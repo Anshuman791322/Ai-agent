@@ -56,11 +56,11 @@ class WakePhraseListener:
             try:
                 stream.stop()
             except Exception:
-                pass
+                log.debug("Wake listener stream stop failed", exc_info=True)
             try:
                 stream.close()
             except Exception:
-                pass
+                log.debug("Wake listener stream close failed", exc_info=True)
             self._stream = None
 
         if self._thread is not None:

@@ -1,0 +1,8 @@
+exclude_dirs:
+  - .venv
+  - build
+  - dist
+  - installer-output
+  - tests
+skips:
+  - B606

@@ -1754,40 +1754,40 @@ class SystemTrayController:
 
 ## 10. Migration Plan from Current Jarvis to New Windows App
 
-1. Phase 1: architecture extraction  
-Goals: split the current repo into transport, orchestration, providers, memory, and actions.  
-Tasks: carve `server.py` into interfaces; freeze active behavior with a small contract test suite; delete or quarantine dead code paths.  
-Risks: hidden coupling inside prompt/action flows; drift between README and runtime.  
+1. Phase 1: architecture extraction
+Goals: split the current repo into transport, orchestration, providers, memory, and actions.
+Tasks: carve `server.py` into interfaces; freeze active behavior with a small contract test suite; delete or quarantine dead code paths.
+Risks: hidden coupling inside prompt/action flows; drift between README and runtime.
 Success criteria: no business logic remains trapped in the WebSocket handler or raw AppleScript branches.
 
-2. Phase 2: provider abstraction  
-Goals: remove Anthropic/Fish hard-coding.  
-Tasks: introduce LLM/STT/TTS provider interfaces; add Ollama provider first; move cloud providers behind optional adapters.  
-Risks: behavior shifts when prompt budgets and latency change.  
+2. Phase 2: provider abstraction
+Goals: remove Anthropic/Fish hard-coding.
+Tasks: introduce LLM/STT/TTS provider interfaces; add Ollama provider first; move cloud providers behind optional adapters.
+Risks: behavior shifts when prompt budgets and latency change.
 Success criteria: the assistant can boot and answer locally with no paid API configured.
 
-3. Phase 3: Windows action layer  
-Goals: replace AppleScript with Windows-native operations.  
-Tasks: implement shell, file, clipboard, screenshot, notification, startup, and app/window adapters; add safety checks for PowerShell and file ops.  
-Risks: overexposing dangerous system actions.  
+3. Phase 3: Windows action layer
+Goals: replace AppleScript with Windows-native operations.
+Tasks: implement shell, file, clipboard, screenshot, notification, startup, and app/window adapters; add safety checks for PowerShell and file ops.
+Risks: overexposing dangerous system actions.
 Success criteria: all core desktop actions work on Windows with explicit safety constraints.
 
-4. Phase 4: local model integration  
-Goals: make the voice and chat loop fully local-first.  
-Tasks: wire faster-whisper STT, Ollama chat, optional Piper TTS, subsystem health probes, and degraded-mode UX.  
-Risks: model size and latency tradeoffs on lower-end hardware.  
+4. Phase 4: local model integration
+Goals: make the voice and chat loop fully local-first.
+Tasks: wire faster-whisper STT, Ollama chat, optional Piper TTS, subsystem health probes, and degraded-mode UX.
+Risks: model size and latency tradeoffs on lower-end hardware.
 Success criteria: typed chat and push-to-talk both work offline once local models are installed.
 
-5. Phase 5: UI redesign  
-Goals: replace the browser orb app with a native desktop shell.  
-Tasks: ship the PySide6 console UI, tray, badges, scanlines, quick actions, and transcript log; preserve the Jarvis feel without the browser dependency.  
-Risks: overbuilding visuals before action flows stabilize.  
+5. Phase 5: UI redesign
+Goals: replace the browser orb app with a native desktop shell.
+Tasks: ship the PySide6 console UI, tray, badges, scanlines, quick actions, and transcript log; preserve the Jarvis feel without the browser dependency.
+Risks: overbuilding visuals before action flows stabilize.
 Success criteria: users can run the assistant entirely from the native desktop app.
 
-6. Phase 6: packaging and testing  
-Goals: make the Windows app installable and maintainable.  
-Tasks: add PyInstaller packaging, smoke tests, action safety tests, provider mocks, and configuration migration tooling.  
-Risks: bundling Whisper/Qt/runtime dependencies cleanly.  
+6. Phase 6: packaging and testing
+Goals: make the Windows app installable and maintainable.
+Tasks: add PyInstaller packaging, smoke tests, action safety tests, provider mocks, and configuration migration tooling.
+Risks: bundling Whisper/Qt/runtime dependencies cleanly.
 Success criteria: one-folder Windows build starts, hides to tray, and runs basic local chat on a clean machine.
 
 ## 11. Final Recommendations

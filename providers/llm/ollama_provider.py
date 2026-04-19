@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
-import subprocess
+import subprocess  # nosec B404
 import sys
 from dataclasses import dataclass
 
@@ -218,7 +218,7 @@ class OllamaProvider(LLMProvider):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 creationflags=creationflags,
-            )
+            )  # nosec B603
         except Exception:
             log.exception("Failed to auto-start Ollama service")
 

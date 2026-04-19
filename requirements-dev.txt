@@ -1,0 +1,5 @@
+# Local tooling for dependency and secret hygiene.
+pre-commit>=4.4,<5
+pip-audit>=2.8,<3
+bandit>=1.8,<2
+pytest>=9.0.3,<10

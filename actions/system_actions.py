@@ -6,12 +6,15 @@ import os
 import platform
 import re
 import shutil
-import subprocess
+import subprocess  # nosec B404
 import webbrowser
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from config.settings import AppSettings
+from security.models import ActionBudget, HandoffEnvelope
+from security.redaction import sanitize_for_log
 
 
 @dataclass(slots=True)
@@ -19,25 +22,10 @@ class ActionResult:
     success: bool
     message: str
     output: str = ""
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 class SystemActions:
-    def __init__(self, settings: AppSettings | None = None) -> None:
-        self.settings = settings
-
-    _DANGEROUS_PATTERNS = [
-        r"\bremove-item\b",
-        r"\bdel\b",
-        r"\berase\b",
-        r"\brmdir\b",
-        r"\bformat\b",
-        r"\bshutdown\b",
-        r"\brestart-computer\b",
-        r"\bstop-computer\b",
-        r"\bclear-disk\b",
-        r"\bset-executionpolicy\b",
-        r"\breg\s+delete\b",
-    ]
     _APP_ALIASES: dict[str, tuple[str, ...]] = {
         "claude code": (
             "claude code",
@@ -50,36 +38,12 @@ class SystemActions:
             "cloud noodles",
             "clawed code",
         ),
-        "file explorer": (
-            "file explorer",
-            "windows explorer",
-            "explorer",
-        ),
-        "powershell": (
-            "powershell",
-            "power shell",
-            "terminal",
-            "windows terminal",
-        ),
-        "command prompt": (
-            "command prompt",
-            "cmd",
-            "cmd.exe",
-        ),
-        "visual studio code": (
-            "visual studio code",
-            "vs code",
-            "vscode",
-            "code",
-        ),
-        "chrome": (
-            "chrome",
-            "google chrome",
-        ),
-        "edge": (
-            "edge",
-            "microsoft edge",
-        ),
+        "file explorer": ("file explorer", "windows explorer", "explorer"),
+        "powershell": ("powershell", "power shell", "windows terminal"),
+        "command prompt": ("command prompt", "cmd", "cmd.exe"),
+        "visual studio code": ("visual studio code", "vs code", "vscode", "code"),
+        "chrome": ("chrome", "google chrome"),
+        "edge": ("edge", "microsoft edge"),
     }
     _SITE_ALIASES: dict[str, str] = {
         "chatgpt": "https://chatgpt.com/",
@@ -95,14 +59,45 @@ class SystemActions:
         "x": "https://x.com/",
         "twitter": "https://x.com/",
     }
+    _WORKSPACE_COMMANDS: dict[str, list[str]] = {
+        "pytest": ["python", "-m", "pytest"],
+        "ruff-check": ["python", "-m", "ruff", "check", "."],
+        "ruff-format": ["python", "-m", "ruff", "format", "."],
+    }
+
+    def __init__(self, settings: AppSettings | None = None) -> None:
+        self.settings = settings
 
     def healthcheck(self) -> dict:
-        shell = shutil.which("powershell") or shutil.which("pwsh")
+        claude = shutil.which("claude")
         if platform.system() != "Windows":
             return {"state": "warn", "detail": "designed for Windows; running in compatibility mode"}
-        if not shell:
-            return {"state": "warn", "detail": "PowerShell not found"}
-        return {"state": "ok", "detail": f"PowerShell ready at {shell}"}
+        if not claude:
+            return {"state": "warn", "detail": "Claude Code CLI not found in PATH"}
+        return {"state": "ok", "detail": "safe action registry ready"}
+
+    def allowlisted_app_targets(self) -> set[str]:
+        return set(self._APP_ALIASES.keys())
+
+    def is_approved_url(self, target: str) -> bool:
+        host = self._extract_host(target)
+        if host is None or self.settings is None:
+            return False
+        return host in self.settings.approved_browser_hosts
+
+    def preview_budget(self) -> ActionBudget:
+        return ActionBudget(files_read=1, runtime_seconds=5, context_chars=2400)
+
+    def workspace_command_budget(self) -> ActionBudget:
+        return ActionBudget(runtime_seconds=120, subprocess_count=1, files_modified=2)
+
+    def claude_task_budget(self) -> ActionBudget:
+        runtime = 180 if self.settings is None else self.settings.max_task_runtime_seconds
+        return ActionBudget(runtime_seconds=runtime, subprocess_count=1, files_modified=6, context_chars=2000, memory_items=3)
+
+    def advanced_shell_budget(self) -> ActionBudget:
+        runtime = 180 if self.settings is None else self.settings.max_task_runtime_seconds
+        return ActionBudget(runtime_seconds=runtime, subprocess_count=1, files_modified=20, context_chars=4000)
 
     async def open_target(self, target: str) -> ActionResult:
         return await asyncio.to_thread(self._open_target_sync, target)
@@ -113,39 +108,138 @@ class SystemActions:
     async def open_in_browser(self, target: str, browser: str = "chrome") -> ActionResult:
         return await asyncio.to_thread(self._open_in_browser_sync, target, browser)
 
-    async def run_claude_code_task(self, prompt: str, timeout: int = 240) -> ActionResult:
-        prompt = prompt.strip()
-        if not prompt:
-            return ActionResult(False, "No Claude Code task was provided.")
+    async def open_explorer(self, target_path: Path) -> ActionResult:
+        return await asyncio.to_thread(self._open_explorer_sync, target_path)
 
-        claude = shutil.which("claude")
+    async def list_workspace_files(self, target_path: Path, limit: int = 40) -> ActionResult:
+        return await asyncio.to_thread(self._list_workspace_files_sync, target_path, limit)
+
+    async def preview_file(self, target_path: Path, max_chars: int = 2400) -> ActionResult:
+        return await asyncio.to_thread(self._preview_file_sync, target_path, max_chars)
+
+    async def run_workspace_command(self, command_id: str, timeout: int | None = None) -> ActionResult:
+        runtime = timeout or (self.settings.max_task_runtime_seconds if self.settings is not None else 180)
+        if self.settings is not None and command_id not in self.settings.allowed_workspace_commands:
+            return ActionResult(False, f"Workspace command {command_id!r} is not enabled by policy.")
+        command = self._WORKSPACE_COMMANDS.get(command_id)
+        if command is None:
+            return ActionResult(False, f"Workspace command {command_id!r} is not allowlisted.")
+
         workspace = self._claude_workspace()
-        if not claude:
-            return ActionResult(False, "Claude Code was not found in PATH.")
         if workspace is None:
-            return ActionResult(False, "Claude Code workspace path was not found.")
+            return ActionResult(False, "No approved workspace is configured.")
+
+        executable = shutil.which(command[0])
+        if executable is None:
+            return ActionResult(False, f"{command[0]} was not found on this machine.")
 
         process = await asyncio.create_subprocess_exec(
-            claude,
-            "-p",
-            self._claude_task_prompt(prompt),
+            executable,
+            *command[1:],
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(workspace),
+            creationflags=self._no_window_flags(),
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=runtime)
+        except asyncio.TimeoutError:
+            process.kill()
+            return ActionResult(False, f"Workspace command {command_id} timed out.")
+        except asyncio.CancelledError:
+            process.kill()
+            await process.communicate()
+            raise
+
+        output = stdout.decode(errors="ignore").strip()
+        error = stderr.decode(errors="ignore").strip()
+        if process.returncode != 0:
+            return ActionResult(False, error or f"Workspace command {command_id} failed.", output=output[:2400])
+        summary = output[:2400] if output else f"Workspace command {command_id} completed successfully."
+        return ActionResult(True, summary, output=summary)
+
+    async def launch_claude_interactive(self) -> ActionResult:
+        return await asyncio.to_thread(self._launch_claude_code_sync)
+
+    async def run_claude_code_task(self, envelope: HandoffEnvelope, timeout: int = 240) -> ActionResult:
+        workspace = next((path for path in envelope.allowed_paths if path.exists()), None)
+        before = self._git_changed_files(workspace)
+        process = await asyncio.create_subprocess_exec(
+            *envelope.command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(envelope.working_directory),
+            creationflags=self._no_window_flags(),
         )
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             process.kill()
             return ActionResult(False, "Claude Code task timed out.")
+        except asyncio.CancelledError:
+            process.kill()
+            await process.communicate()
+            raise
 
         output = stdout.decode(errors="ignore").strip()
         error = stderr.decode(errors="ignore").strip()
         if process.returncode != 0:
-            return ActionResult(False, error or "Claude Code task failed.", output=output[:2000])
+            return ActionResult(False, error or "Claude Code task failed.", output=output[:3200])
 
+        after = self._git_changed_files(workspace)
+        changed_files = sorted(after.difference(before))
         summary = self._summarize_claude_output(output)
-        return ActionResult(True, summary, output=summary)
+        return ActionResult(
+            True,
+            summary,
+            output=summary,
+            details={
+                "handoff_type": envelope.handoff_type.value,
+                "changed_files": changed_files,
+                "working_directory": str(envelope.working_directory),
+                "allowed_paths": [str(path) for path in envelope.allowed_paths],
+                "forbidden_paths": [str(path) for path in envelope.forbidden_paths[:10]],
+                "prompt_chars": envelope.prompt_chars,
+                "memory_items_used": envelope.memory_items_used,
+                "sensitive_items_blocked": envelope.sensitive_items_blocked,
+                "context_flags": envelope.context.enabled(),
+            },
+        )
+
+    async def run_advanced_shell(self, command: str, timeout: int = 180) -> ActionResult:
+        if self.settings is None or not self.settings.advanced_shell_enabled:
+            return ActionResult(False, "Advanced shell access is disabled by policy.")
+
+        shell = shutil.which("powershell") or shutil.which("pwsh")
+        if not shell:
+            return ActionResult(False, "PowerShell was not found on this machine.")
+
+        workspace = self._claude_workspace()
+        process = await asyncio.create_subprocess_exec(
+            shell,
+            "-NoProfile",
+            "-Command",
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(workspace) if workspace is not None else None,
+            creationflags=self._no_window_flags(),
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            process.kill()
+            return ActionResult(False, "Advanced shell command timed out.")
+        except asyncio.CancelledError:
+            process.kill()
+            await process.communicate()
+            raise
+
+        output = stdout.decode(errors="ignore").strip()
+        error = stderr.decode(errors="ignore").strip()
+        if process.returncode != 0:
+            return ActionResult(False, error or "Advanced shell command failed.", output=output[:2400])
+        return ActionResult(True, "Advanced shell command completed.", output=output[:2400])
 
     def canonicalize_launch_target(self, target: str) -> str | None:
         normalized = self._normalize_target(target)
@@ -178,6 +272,21 @@ class SystemActions:
             return best_match
         return None
 
+    def resolve_site_target(self, target: str) -> str | None:
+        cleaned = target.strip().strip('"').strip("'")
+        if not cleaned:
+            return None
+
+        normalized = self._normalize_target(cleaned)
+        if normalized in self._SITE_ALIASES:
+            return self._SITE_ALIASES[normalized]
+
+        if cleaned.startswith(("http://", "https://")):
+            return cleaned
+        if "." in cleaned and " " not in cleaned:
+            return f"https://{cleaned}"
+        return None
+
     def _open_target_sync(self, target: str) -> ActionResult:
         target = target.strip().strip('"')
         if not target:
@@ -203,9 +312,9 @@ class SystemActions:
             return ActionResult(False, f"Unknown Windows app target: {target}")
 
         if canonical == "claude code":
-            return self._launch_claude_code()
+            return self._launch_claude_code_sync()
         if canonical == "file explorer":
-            return self._spawn_process(["explorer.exe"], "Opened File Explorer.")
+            return self._open_explorer_sync(self._claude_workspace() or Path.home())
         if canonical == "powershell":
             shell = shutil.which("powershell") or shutil.which("pwsh")
             if not shell:
@@ -217,7 +326,11 @@ class SystemActions:
             code_path = shutil.which("code")
             if not code_path:
                 return ActionResult(False, "Visual Studio Code was not found in PATH.")
-            return self._spawn_process([code_path], "Opened Visual Studio Code.")
+            workspace = self._claude_workspace()
+            command = [code_path]
+            if workspace is not None:
+                command.append(str(workspace))
+            return self._spawn_process(command, "Opened Visual Studio Code.", cwd=workspace)
         if canonical == "chrome":
             chrome_path = self._find_chrome_path()
             if chrome_path is None:
@@ -240,53 +353,46 @@ class SystemActions:
         if executable is None:
             return ActionResult(False, f"{browser_name.title()} was not found on this machine.")
 
-        display_name = browser_name.title()
-        if browser_name == "chrome":
-            display_name = "Google Chrome"
-        elif browser_name == "edge":
-            display_name = "Microsoft Edge"
-
+        display_name = "Google Chrome" if browser_name == "chrome" else "Microsoft Edge"
         return self._spawn_process([executable, resolved_url], f"Opened {resolved_url} in {display_name}.")
 
-    async def run_powershell_safe(self, command: str, timeout: int = 15) -> ActionResult:
-        command = command.strip()
-        if not command:
-            return ActionResult(False, "No PowerShell command provided.")
+    def _open_explorer_sync(self, target_path: Path) -> ActionResult:
+        target_path = Path(target_path).expanduser()
+        if not target_path.exists():
+            return ActionResult(False, f"Path not found: {target_path}")
+        return self._spawn_process(["explorer.exe", str(target_path)], f"Opened File Explorer at {target_path}.")
 
-        if self._looks_dangerous(command):
-            return ActionResult(False, "Blocked potentially destructive PowerShell command.")
+    def _list_workspace_files_sync(self, target_path: Path, limit: int) -> ActionResult:
+        target_path = Path(target_path).expanduser()
+        if not target_path.exists():
+            return ActionResult(False, f"Path not found: {target_path}")
+        if not target_path.is_dir():
+            return ActionResult(False, f"{target_path} is not a directory.")
 
-        shell = shutil.which("powershell") or shutil.which("pwsh")
-        if not shell:
-            return ActionResult(False, "PowerShell was not found on this machine.")
+        entries = []
+        for item in sorted(target_path.iterdir(), key=lambda path: (not path.is_dir(), path.name.lower()))[:limit]:
+            marker = "[DIR]" if item.is_dir() else "     "
+            entries.append(f"{marker} {item.name}")
+        summary = "\n".join(entries) if entries else "(empty directory)"
+        return ActionResult(True, f"Files in {target_path}:\n{summary}", output=summary)
 
-        process = await asyncio.create_subprocess_exec(
-            shell,
-            "-NoProfile",
-            "-Command",
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+    def _preview_file_sync(self, target_path: Path, max_chars: int) -> ActionResult:
+        target_path = Path(target_path).expanduser()
+        if not target_path.exists():
+            return ActionResult(False, f"Path not found: {target_path}")
+        if not target_path.is_file():
+            return ActionResult(False, f"{target_path} is not a file.")
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            process.kill()
-            return ActionResult(False, "PowerShell command timed out.")
+            content = target_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError as exc:
+            return ActionResult(False, f"Could not read {target_path}: {exc}")
 
-        output = stdout.decode(errors="ignore").strip()
-        error = stderr.decode(errors="ignore").strip()
+        preview = content[:max_chars]
+        if len(content) > max_chars:
+            preview = preview.rstrip() + "\n[preview truncated]"
+        return ActionResult(True, f"Preview of {target_path.name}:\n{preview}", output=preview)
 
-        if process.returncode != 0:
-            return ActionResult(False, error or "PowerShell command failed.", output=output)
-
-        return ActionResult(True, "PowerShell command completed.", output=output[:1200])
-
-    def _looks_dangerous(self, command: str) -> bool:
-        lowered = command.lower()
-        return any(re.search(pattern, lowered) for pattern in self._DANGEROUS_PATTERNS)
-
-    def _launch_claude_code(self) -> ActionResult:
+    def _launch_claude_code_sync(self) -> ActionResult:
         shell = shutil.which("powershell") or shutil.which("pwsh")
         claude = shutil.which("claude")
         if not shell:
@@ -297,10 +403,7 @@ class SystemActions:
         if workspace is None:
             return ActionResult(False, "Claude Code workspace path was not found.")
         escaped_workspace = str(workspace).replace("'", "''")
-        command = (
-            f"Set-Location -LiteralPath '{escaped_workspace}'; "
-            "claude"
-        )
+        command = f"Set-Location -LiteralPath '{escaped_workspace}'; claude"
         return self._spawn_process(
             [shell, "-NoExit", "-Command", command],
             f"Opened Claude Code in {workspace}.",
@@ -308,28 +411,33 @@ class SystemActions:
         )
 
     def _spawn_process(self, command: list[str], message: str, cwd: Path | None = None) -> ActionResult:
-        creationflags = 0
-        if platform.system() == "Windows":
-            creationflags = (
-                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                | getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
-            )
-
         try:
             subprocess.Popen(
                 command,
                 cwd=str(cwd) if cwd is not None else None,
-                creationflags=creationflags,
-            )
+                creationflags=self._spawn_flags(),
+            )  # nosec B603
         except Exception as exc:
-            return ActionResult(False, f"Failed to launch {' '.join(command)}: {exc}")
+            safe_command = sanitize_for_log(" ".join(command), max_chars=200)
+            return ActionResult(False, f"Failed to launch {safe_command}: {exc}")
         return ActionResult(True, message)
+
+    @staticmethod
+    def _spawn_flags() -> int:
+        if platform.system() != "Windows":
+            return 0
+        return getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+
+    @staticmethod
+    def _no_window_flags() -> int:
+        if platform.system() != "Windows":
+            return 0
+        return getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
     def _find_chrome_path(self) -> str | None:
         chrome = shutil.which("chrome") or shutil.which("chrome.exe")
         if chrome:
             return chrome
-
         candidates = (
             Path(os.getenv("PROGRAMFILES", "")) / "Google/Chrome/Application/chrome.exe",
             Path(os.getenv("PROGRAMFILES(X86)", "")) / "Google/Chrome/Application/chrome.exe",
@@ -344,7 +452,6 @@ class SystemActions:
         edge = shutil.which("msedge") or shutil.which("msedge.exe")
         if edge:
             return edge
-
         candidates = (
             Path(os.getenv("PROGRAMFILES", "")) / "Microsoft/Edge/Application/msedge.exe",
             Path(os.getenv("PROGRAMFILES(X86)", "")) / "Microsoft/Edge/Application/msedge.exe",
@@ -362,22 +469,15 @@ class SystemActions:
             return self._find_edge_path()
         return None
 
-    def resolve_site_target(self, target: str) -> str | None:
-        cleaned = target.strip().strip('"').strip("'")
-        if not cleaned:
+    def _extract_host(self, target: str) -> str | None:
+        resolved = self.resolve_site_target(target)
+        if resolved is None:
             return None
+        parsed = re.sub(r"^https?://", "", resolved).split("/", 1)[0].lower()
+        return parsed
 
-        normalized = self._normalize_target(cleaned)
-        if normalized in self._SITE_ALIASES:
-            return self._SITE_ALIASES[normalized]
-
-        if cleaned.startswith(("http://", "https://")):
-            return cleaned
-        if "." in cleaned and " " not in cleaned:
-            return f"https://{cleaned}"
-        return None
-
-    def _normalize_target(self, target: str) -> str:
+    @staticmethod
+    def _normalize_target(target: str) -> str:
         normalized = re.sub(r"[^a-z0-9\s]+", " ", target.lower())
         normalized = re.sub(r"\s+", " ", normalized).strip()
         return normalized.removeprefix("the ").strip()
@@ -388,10 +488,6 @@ class SystemActions:
         return candidate if candidate.exists() else None
 
     @staticmethod
-    def _claude_task_prompt(user_task: str) -> str:
-        return " ".join(user_task.split()).strip()
-
-    @staticmethod
     def _summarize_claude_output(output: str) -> str:
         cleaned = output.strip()
         if not cleaned:
@@ -399,3 +495,27 @@ class SystemActions:
         if len(cleaned) <= 3200:
             return f"Claude Code:\n{cleaned}"
         return f"Claude Code:\n{cleaned[:3200].rstrip()}\n\n[output truncated]"
+
+    def _git_changed_files(self, workspace: Path | None) -> set[str]:
+        git_exe = shutil.which("git")
+        if workspace is None or git_exe is None:
+            return set()
+        try:
+            completed = subprocess.run(
+                [git_exe, "status", "--porcelain"],
+                cwd=str(workspace),
+                capture_output=True,
+                text=True,
+                check=False,
+                creationflags=self._no_window_flags(),
+            )  # nosec B603
+        except Exception:
+            return set()
+        if completed.returncode != 0:
+            return set()
+        changed: set[str] = set()
+        for line in completed.stdout.splitlines():
+            if not line.strip():
+                continue
+            changed.add(line[3:].strip())
+        return changed

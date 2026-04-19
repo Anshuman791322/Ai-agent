@@ -1,0 +1,49 @@
+name: Security
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Install gitleaks
+        run: choco install gitleaks -y
+
+      - name: Check environment
+        run: python -m pip check
+
+      - name: Run pre-commit hygiene checks
+        run: pre-commit run --all-files --show-diff-on-failure
+
+      - name: Run tests
+        run: python -m pytest tests -q
+
+      - name: Run bandit
+        run: bandit -q -c bandit.yaml -r .
+
+      - name: Audit dependencies
+        run: pip-audit
+
+      - name: Scan for leaked secrets
+        run: gitleaks detect --source . --redact

@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import ctypes
 import logging
 import signal
@@ -11,6 +10,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMessageBox
 
+from actions.registry import ActionRegistry
 from actions.system_actions import SystemActions
 from config.settings import AppSettings
 from core.app_state import AppState
@@ -20,6 +20,12 @@ from integrations.windows_context import WindowsContextProbe
 from memory.store import MemoryStore
 from providers.llm.ollama_provider import OllamaProvider
 from resources import load_app_icon
+from security.approvals import ApprovalManager
+from security.audit import AuditLogger
+from security.context_manager import ContextManager
+from security.handoff import HandoffManager
+from security.policy import PolicyEngine
+from security.workspace import WorkspaceJail
 from ui.main_window import MainWindow
 from ui.system_tray import SystemTrayController
 from voice.stt_whisper import WhisperSTT
@@ -79,7 +85,7 @@ def show_fatal_error(title: str, message: str, details: str = "") -> None:
             ctypes.windll.user32.MessageBoxW(None, body, title, 0x10)
             return
         except Exception:
-            pass
+            log.debug("Native fatal error dialog failed", exc_info=True)
 
     print(f"{title}: {body}", file=sys.stderr)
 
@@ -140,9 +146,15 @@ class AppBootstrap:
         self.bus: EventBus | None = None
         self.state: AppState | None = None
         self.memory: MemoryStore | None = None
+        self.jail: WorkspaceJail | None = None
+        self.policy: PolicyEngine | None = None
+        self.approvals: ApprovalManager | None = None
+        self.audit: AuditLogger | None = None
+        self.context_manager: ContextManager | None = None
         self.llm: OllamaProvider | None = None
         self.voice: WhisperSTT | None = None
         self.actions: SystemActions | None = None
+        self.registry: ActionRegistry | None = None
         self.context_probe: WindowsContextProbe | None = None
         self.orchestrator: Orchestrator | None = None
         self.window: MainWindow | None = None
@@ -160,6 +172,8 @@ class AppBootstrap:
             self.settings = AppSettings.load()
             configure_logging(self.settings.log_file)
             set_windows_app_id(self.settings.app_id)
+            for warning in self.settings.validation_warnings:
+                log.warning("Settings validation: %s", warning)
             self._create_application()
             self._acquire_single_instance()
             self._create_runtime_objects()
@@ -183,20 +197,12 @@ class AppBootstrap:
         self._shutdown_started = True
         log.info("Shutting down application")
 
-        if self.dispatch_timer is not None:
-            self.dispatch_timer.stop()
-            self.dispatch_timer.deleteLater()
-            self.dispatch_timer = None
-
-        if self.health_timer is not None:
-            self.health_timer.stop()
-            self.health_timer.deleteLater()
-            self.health_timer = None
-
-        if self.context_timer is not None:
-            self.context_timer.stop()
-            self.context_timer.deleteLater()
-            self.context_timer = None
+        for timer_attr in ("dispatch_timer", "health_timer", "context_timer"):
+            timer = getattr(self, timer_attr)
+            if timer is not None:
+                timer.stop()
+                timer.deleteLater()
+                setattr(self, timer_attr, None)
 
         if self.tray is not None:
             self.tray.shutdown()
@@ -247,9 +253,20 @@ class AppBootstrap:
         self.bus = EventBus()
         self.state = AppState(max_logs=self.settings.max_console_blocks)
         self.memory = MemoryStore(self.settings.database_path)
+        self.jail = WorkspaceJail(self.settings)
+        self.approvals = ApprovalManager()
+        self.audit = AuditLogger(self.settings.app_dir, debug_sensitive_logging=self.settings.debug_sensitive_logging)
+        self.context_manager = ContextManager(self.settings, self.memory)
         self.llm = OllamaProvider(self.settings)
         self.voice = WhisperSTT(self.settings)
         self.actions = SystemActions(self.settings)
+        self.registry = ActionRegistry(
+            self.settings,
+            self.actions,
+            self.jail,
+            HandoffManager(self.settings, self.jail, self.context_manager),
+        )
+        self.policy = PolicyEngine(self.settings, self.jail)
         self.context_probe = WindowsContextProbe()
         self.orchestrator = Orchestrator(
             self.settings,
@@ -259,6 +276,12 @@ class AppBootstrap:
             self.llm,
             self.voice,
             self.actions,
+            self.registry,
+            self.policy,
+            self.approvals,
+            self.audit,
+            self.context_manager,
+            self.jail,
             self.context_probe,
         )
 
@@ -267,7 +290,15 @@ class AppBootstrap:
         if not icon.isNull():
             self.window.setWindowIcon(icon)
 
-        self.tray = SystemTrayController(self.app, self.window, icon=icon, tooltip=self.settings.app_name)
+        self.tray = SystemTrayController(
+            self.app,
+            self.window,
+            icon=icon,
+            tooltip=self.settings.app_name,
+            pause_callback=self.orchestrator.toggle_autonomy_pause,
+            stop_callback=self.orchestrator.stop_active_task,
+            show_approvals_callback=None,
+        )
         tray_available = self.tray.is_available()
         self.window.set_hide_to_tray(tray_available)
         self.app.setQuitOnLastWindowClosed(not tray_available)
@@ -278,10 +309,20 @@ class AppBootstrap:
         self.bus.subscribe("log", self.window.append_log)
         self.bus.subscribe("status", self.window.update_statuses)
         self.bus.subscribe("context", self.window.update_context)
+        self.bus.subscribe("policy", self.window.update_policy_state)
+        self.bus.subscribe("approvals", self.window.update_approval_state)
 
         self.window.command_input.submitted.connect(self.orchestrator.submit_text)
         self.window.command_input.voice_requested.connect(self.orchestrator.submit_voice_capture)
         self.window.quick_command_requested.connect(self.orchestrator.submit_text)
+        self.window.autonomy_mode_changed.connect(self.orchestrator.set_autonomy_mode)
+        self.window.pause_requested.connect(self.orchestrator.toggle_autonomy_pause)
+        self.window.deny_high_risk_requested.connect(self.orchestrator.toggle_deny_high_risk)
+        self.window.stop_requested.connect(self.orchestrator.stop_active_task)
+        self.window.approve_requested.connect(self.orchestrator.approve_pending)
+        self.window.deny_requested.connect(self.orchestrator.deny_pending)
+        self.window.clear_approvals_requested.connect(self.orchestrator.clear_pending_approvals)
+        self.window.voice_toggle_requested.connect(self.orchestrator.toggle_voice_activation)
 
     def _create_timers(self) -> None:
         self.dispatch_timer = QTimer(self.app)
