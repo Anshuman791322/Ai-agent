@@ -87,4 +87,3 @@ class WorkspaceJail:
             if resolved not in roots:
                 roots.append(resolved)
         return roots
-

@@ -51,4 +51,3 @@ def looks_sensitive(text: str) -> bool:
     lowered = text.lower()
     keywords = ("token", "secret", "password", "cookie", "session", "key")
     return any(keyword in lowered for keyword in keywords)
-

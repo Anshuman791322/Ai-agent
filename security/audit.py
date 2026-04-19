@@ -22,4 +22,3 @@ class AuditLogger:
         with self._lock:
             with self.path.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
-
