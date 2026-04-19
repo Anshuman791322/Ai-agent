@@ -45,7 +45,7 @@ def security_workspace_factory(tmp_path):
     from config.settings import AppSettings
     from security.models import AutonomyMode
 
-    def build(*, autonomy_mode: AutonomyMode = AutonomyMode.BALANCED, advanced_shell_enabled: bool = False):
+    def build(*, autonomy_mode: AutonomyMode = AutonomyMode.BALANCED):
         workspace = tmp_path / "workspace"
         documents = tmp_path / "documents"
         sensitive = tmp_path / "sensitive"
@@ -62,7 +62,6 @@ def security_workspace_factory(tmp_path):
         settings.sensitive_roots = [str(sensitive)]
         settings.forbidden_roots = [str(forbidden)]
         settings.autonomy_mode = autonomy_mode
-        settings.advanced_shell_enabled = advanced_shell_enabled
         settings.ensure_directories()
         return settings, workspace, documents, sensitive, forbidden
 

@@ -75,15 +75,12 @@ class PolicyEngine:
             assessment = None
 
         if request.action_type == ActionType.ADVANCED_SHELL:
-            if not self.settings.advanced_shell_enabled:
-                return PolicyDecision(
-                    decision=PolicyDecisionType.BLOCK,
-                    risk=RiskTier.CRITICAL,
-                    reasons=("advanced shell execution is disabled by default",),
-                    trust_zone=trust_zone,
-                )
-            risk = _max_risk(risk, RiskTier.HIGH)
-            reasons.append("advanced shell execution is always high risk")
+            return PolicyDecision(
+                decision=PolicyDecisionType.BLOCK,
+                risk=RiskTier.CRITICAL,
+                reasons=("advanced shell execution is not available in this build",),
+                trust_zone=trust_zone,
+            )
 
         if request.action_type == ActionType.RUN_WORKSPACE_COMMAND and not request.metadata.get("command_allowed", False):
             return PolicyDecision(

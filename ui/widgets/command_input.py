@@ -18,7 +18,7 @@ class CommandInputWidget(QFrame):
 
         self.line_edit = QLineEdit(self)
         self.line_edit.setObjectName("commandLineEdit")
-        self.line_edit.setPlaceholderText("Type here, or say 'Jarvis' and then your command. PTT is fallback only.")
+        self.line_edit.setPlaceholderText("Type a command, try /search or /summarize, or say 'Jarvis' and then your command.")
 
         self.approve_button = QPushButton("APPROVE", self)
         self.approve_button.setObjectName("commandAuxButton")

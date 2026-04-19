@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from config.settings import AppSettings
 from security.context_manager import ContextManager
-from security.models import ActionRequest, ContextSelection, HandoffEnvelope, HandoffType, TrustZone
+from security.models import ActionRequest, ActionType, ContextSelection, HandoffEnvelope, HandoffType, TrustZone
 from security.redaction import sanitize_untrusted_text
 from security.workspace import WorkspaceJail
 
@@ -66,6 +66,38 @@ class HandoffManager:
             sensitive_items_blocked=bundle.sensitive_items_blocked,
         )
 
+    def validate_claude_envelope(self, request: ActionRequest, envelope: HandoffEnvelope) -> str | None:
+        if request.action_type != ActionType.CLAUDE_TASK:
+            return "handoff request type is invalid"
+        if envelope.handoff_type != HandoffType.CLAUDE_CODE:
+            return "handoff type is invalid"
+        if envelope.context.recent_chat:
+            return "recent chat cannot be injected directly into Claude handoff"
+        if envelope.prompt_chars != len(envelope.prompt):
+            return "handoff prompt size metadata is inconsistent"
+        if envelope.memory_items_used > self.settings.max_memory_items_injected:
+            return "handoff memory budget exceeded"
+        if not envelope.allowed_paths:
+            return "handoff has no approved path scope"
+        if not self._is_relative_to(envelope.working_directory, self.task_root):
+            return "handoff working directory escaped the managed task scope"
+        if not envelope.command or Path(envelope.command[0]).name.lower() not in {"claude", "claude.exe"}:
+            return "handoff command is not the Claude Code CLI"
+        if envelope.command[1:2] != ["-p"] or envelope.command[-1] != envelope.prompt:
+            return "handoff command shape is invalid"
+
+        for path in envelope.allowed_paths:
+            assessment = self.jail.classify(path)
+            if assessment.zone != TrustZone.ALLOWED_WORKSPACE:
+                return f"handoff path escaped the allowlisted workspace: {path}"
+
+        for path in envelope.forbidden_paths:
+            assessment = self.jail.classify(path)
+            if assessment.zone not in {TrustZone.FORBIDDEN, TrustZone.SENSITIVE}:
+                return f"handoff forbidden path is not inside a blocked zone: {path}"
+
+        return None
+
     def _select_allowed_paths(self, task: str, workspace: Path) -> tuple[Path, ...]:
         matches = re.findall(r"[\w./\\-]+\.[A-Za-z0-9]+", task)
         allowed: list[Path] = []
@@ -119,3 +151,11 @@ class HandoffManager:
             "- findings or follow-up notes\n\n"
             f"REQUEST SOURCE: {request.source.value}\n"
         )
+
+    @staticmethod
+    def _is_relative_to(candidate: Path, root: Path) -> bool:
+        try:
+            candidate.resolve(strict=False).relative_to(root.resolve(strict=False))
+            return True
+        except ValueError:
+            return False

@@ -27,9 +27,12 @@ class ActionRegistry:
             unknown_executable=canonical not in self.actions.allowlisted_app_targets(),
         )
 
-    def open_url_request(self, target: str, browser: str, source: ActionSource) -> ActionRequest:
+    def open_url_request(self, target: str, browser: str, source: ActionSource, *, approved_network: bool | None = None) -> ActionRequest:
         resolved = self.actions.resolve_site_target(target) or target
-        metadata = {"browser": browser, "approved_network": self.actions.is_approved_url(resolved)}
+        metadata = {
+            "browser": browser,
+            "approved_network": self.actions.is_approved_url(resolved) if approved_network is None else approved_network,
+        }
         return ActionRequest(
             action_type=ActionType.OPEN_URL,
             source=source,
@@ -143,7 +146,10 @@ class ActionRegistry:
                 request.context,
                 desktop_context,
             )
-            return await self.actions.run_claude_code_task(envelope, timeout=self.settings.max_task_runtime_seconds)
+            validation_error = self.handoff_manager.validate_claude_envelope(request, envelope)
+            if validation_error is not None:
+                return ActionResult(False, f"Claude Code handoff blocked: {validation_error}")
+            return await self.actions.execute_secured_claude_handoff(envelope, timeout=self.settings.max_task_runtime_seconds)
         if request.action_type == ActionType.ADVANCED_SHELL:
             return await self.actions.run_advanced_shell(request.target, timeout=self.settings.max_task_runtime_seconds)
         if request.action_type == ActionType.MEMORY_WRITE:

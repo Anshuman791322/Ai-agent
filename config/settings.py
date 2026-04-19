@@ -139,9 +139,7 @@ class AppSettings:
     theme_background: str = "#050505"
     autonomy_mode: AutonomyMode = AutonomyMode.BALANCED
     allow_remote_model_endpoint: bool = False
-    advanced_shell_enabled: bool = False
     debug_sensitive_logging: bool = False
-    log_raw_wake_transcripts: bool = False
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen3.5:0.8b"
     ollama_timeout_seconds: float = 30.0
@@ -189,6 +187,7 @@ class AppSettings:
     voice_activation_max_seconds: float = 4.5
     voice_activation_end_silence_seconds: float = 0.3
     voice_activation_min_speech_blocks: int = 2
+    start_on_login: bool = False
     claude_code_workspace: str = field(default_factory=_default_workspace)
     allowed_workspace_roots: list[str] = field(default_factory=lambda: [_default_workspace()])
     user_documents_roots: list[str] = field(default_factory=_default_user_documents_roots)
@@ -242,9 +241,7 @@ class AppSettings:
             "theme_background": self.theme_background,
             "autonomy_mode": self.autonomy_mode.value,
             "allow_remote_model_endpoint": self.allow_remote_model_endpoint,
-            "advanced_shell_enabled": self.advanced_shell_enabled,
             "debug_sensitive_logging": self.debug_sensitive_logging,
-            "log_raw_wake_transcripts": self.log_raw_wake_transcripts,
             "ollama_base_url": self.ollama_base_url,
             "ollama_model": self.ollama_model,
             "ollama_timeout_seconds": self.ollama_timeout_seconds,
@@ -279,6 +276,7 @@ class AppSettings:
             "voice_activation_max_seconds": self.voice_activation_max_seconds,
             "voice_activation_end_silence_seconds": self.voice_activation_end_silence_seconds,
             "voice_activation_min_speech_blocks": self.voice_activation_min_speech_blocks,
+            "start_on_login": self.start_on_login,
             "claude_code_workspace": self.claude_code_workspace,
             "allowed_workspace_roots": list(self.allowed_workspace_roots),
             "user_documents_roots": list(self.user_documents_roots),
@@ -323,9 +321,7 @@ class AppSettings:
         settings.theme_background = _parse_string(raw.get("theme_background"), settings.theme_background, max_len=16)
         settings.autonomy_mode = cls._parse_mode(raw.get("autonomy_mode"), settings.validation_warnings)
         settings.allow_remote_model_endpoint = _parse_bool(raw.get("allow_remote_model_endpoint"), settings.allow_remote_model_endpoint)
-        settings.advanced_shell_enabled = _parse_bool(raw.get("advanced_shell_enabled"), settings.advanced_shell_enabled)
         settings.debug_sensitive_logging = _parse_bool(raw.get("debug_sensitive_logging"), settings.debug_sensitive_logging)
-        settings.log_raw_wake_transcripts = _parse_bool(raw.get("log_raw_wake_transcripts"), settings.log_raw_wake_transcripts)
         settings.ollama_base_url = cls._parse_ollama_url(
             raw.get("ollama_base_url"),
             allow_remote=settings.allow_remote_model_endpoint,
@@ -364,6 +360,7 @@ class AppSettings:
         settings.voice_activation_max_seconds = _parse_float(raw.get("voice_activation_max_seconds"), settings.voice_activation_max_seconds, 1.0, 12.0)
         settings.voice_activation_end_silence_seconds = _parse_float(raw.get("voice_activation_end_silence_seconds"), settings.voice_activation_end_silence_seconds, 0.1, 2.0)
         settings.voice_activation_min_speech_blocks = _parse_int(raw.get("voice_activation_min_speech_blocks"), settings.voice_activation_min_speech_blocks, 1, 12)
+        settings.start_on_login = _parse_bool(raw.get("start_on_login"), settings.start_on_login)
         settings.claude_code_workspace = cls._parse_workspace(raw.get("claude_code_workspace"), settings.claude_code_workspace, settings.validation_warnings)
 
         default_workspace_roots = [settings.claude_code_workspace]
@@ -501,6 +498,10 @@ class AppSettings:
             settings.window_title = "JARVIS // WINDOWS COMMAND CENTER"
         if raw.get("memory_history_limit") == 12:
             settings.memory_history_limit = 8
+        if "advanced_shell_enabled" in raw:
+            settings.validation_warnings.append("legacy advanced_shell_enabled is ignored; the advanced shell surface was removed")
+        if "log_raw_wake_transcripts" in raw:
+            settings.validation_warnings.append("legacy log_raw_wake_transcripts is ignored; raw wake transcripts are never logged")
 
     @staticmethod
     def _apply_env_overrides(settings: "AppSettings") -> None:
@@ -512,9 +513,8 @@ class AppSettings:
         if mode_override:
             settings.autonomy_mode = AppSettings._parse_mode(mode_override, settings.validation_warnings)
 
-        advanced_shell_override = os.getenv("JARVIS_ADVANCED_SHELL")
-        if advanced_shell_override:
-            settings.advanced_shell_enabled = _parse_bool(advanced_shell_override, settings.advanced_shell_enabled)
+        if os.getenv("JARVIS_ADVANCED_SHELL"):
+            settings.validation_warnings.append("JARVIS_ADVANCED_SHELL is ignored; the advanced shell surface was removed")
 
         base_url_override = os.getenv("JARVIS_OLLAMA_BASE_URL")
         if base_url_override:

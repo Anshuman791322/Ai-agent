@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import sqlite3
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+from actions.system_actions import SystemActions
 from memory.store import MemoryStore
 from security.context_manager import ContextBundle, ContextManager
 from security.handoff import HandoffManager
-from security.models import ActionRequest, ActionSource, ActionType, ContextSelection, DataSensitivity, MemoryTag
+from security.models import ActionRequest, ActionSource, ActionType, ContextSelection, DataSensitivity, HandoffEnvelope, HandoffType, MemoryTag
 from security.workspace import WorkspaceJail
 
 
@@ -103,3 +106,51 @@ def test_handoff_envelope_sanitizes_prompt_and_disables_recent_chat_for_handoff(
     assert "[REDACTED_SECRET_ASSIGNMENT]" in envelope.prompt
     assert context_manager.build_context_bundle.call_count == 1
     assert context_manager.build_context_bundle.call_args.kwargs["for_handoff"] is True
+    assert manager.validate_claude_envelope(request, envelope) is None
+
+
+def test_memory_store_migrates_legacy_memory_schema(tmp_path):
+    db_path = tmp_path / "legacy_memory.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE memory_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content TEXT NOT NULL,
+            created_at REAL NOT NULL
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    store = MemoryStore(db_path)
+    conn = store._connect()
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(memory_items)").fetchall()}
+    conn.close()
+
+    assert "tag" in columns
+    store.remember("general note", MemoryTag.GENERAL)
+    assert store.list_memories(limit=5)[0]["tag"] == "general"
+
+
+def test_secured_claude_handoff_rejects_direct_unvalidated_execution(security_workspace_factory):
+    settings, workspace, _, _, _ = security_workspace_factory()
+    actions = SystemActions(settings)
+    envelope = HandoffEnvelope(
+        handoff_type=HandoffType.CLAUDE_CODE,
+        command=[r"C:\Tools\claude.exe", "-p", "task"],
+        prompt="task",
+        working_directory=workspace,
+        allowed_paths=(workspace,),
+        forbidden_paths=(),
+        context=ContextSelection(recent_chat=True),
+        prompt_chars=4,
+        memory_items_used=0,
+        sensitive_items_blocked=0,
+    )
+
+    result = asyncio.run(actions.execute_secured_claude_handoff(envelope))
+
+    assert not result.success
+    assert result.message == "Claude Code handoff was rejected before execution."

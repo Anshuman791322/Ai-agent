@@ -114,12 +114,22 @@ def test_policy_blocks_sensitive_and_forbidden_paths_when_high_risk_is_denied(se
 
 
 def test_advanced_shell_execution_is_blocked_in_normal_mode(security_workspace_factory):
-    settings, *_ = security_workspace_factory()
+    settings, workspace, _, _, _ = security_workspace_factory()
     actions = SystemActions(settings)
+    jail = WorkspaceJail(settings)
+    policy = PolicyEngine(settings, jail)
+    registry = ActionRegistry(settings, actions, jail, HandoffManager(settings, jail, ContextManager(settings, MemoryStore(settings.app_dir / "memory.sqlite"))))
 
+    request = registry.advanced_shell_request("Get-ChildItem", ActionSource.TYPED)
+    decision = policy.evaluate(request)
+
+    assert decision.decision == PolicyDecisionType.BLOCK
+    assert decision.risk == RiskTier.CRITICAL
+    assert decision.reasons == ("advanced shell execution is not available in this build",)
+    assert request.workspace == workspace
     result = asyncio.run(actions.run_advanced_shell("Get-ChildItem"))
     assert not result.success
-    assert result.message == "Advanced shell access is disabled by policy."
+    assert result.message == "Advanced shell access is not available in this build."
 
 
 def test_uncurated_workspace_commands_are_blocked_by_policy(security_workspace_factory):

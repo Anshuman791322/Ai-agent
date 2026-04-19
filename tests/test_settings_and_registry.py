@@ -28,7 +28,10 @@ def test_app_settings_load_sanitizes_untrusted_config(tmp_path):
                 "allow_remote_model_endpoint": False,
                 "ollama_base_url": "https://example.com",
                 "ollama_model": "bad model!",
+                "advanced_shell_enabled": True,
                 "voice_activation_engine": "openwakeword",
+                "log_raw_wake_transcripts": True,
+                "start_on_login": "yes",
                 "claude_code_workspace": str(workspace),
                 "allowed_workspace_roots": [str(workspace), str(tmp_path / "missing"), str(workspace)],
                 "user_documents_roots": [str(documents)],
@@ -48,13 +51,20 @@ def test_app_settings_load_sanitizes_untrusted_config(tmp_path):
     assert loaded.ollama_base_url == "http://127.0.0.1:11434"
     assert loaded.ollama_model == "qwen3.5:0.8b"
     assert loaded.voice_activation_engine == "transcript"
+    assert loaded.start_on_login is True
     assert loaded.allowed_workspace_roots[0] == str(workspace.resolve())
     assert loaded.allowed_workspace_commands == ["pytest", "ruff-format"]
     assert loaded.max_files_read_per_task == 200
     assert loaded.max_subprocess_count == 12
     assert loaded.validation_warnings
     assert any("autonomy_mode" in warning for warning in loaded.validation_warnings)
+    assert any("advanced_shell_enabled" in warning for warning in loaded.validation_warnings)
+    assert any("log_raw_wake_transcripts" in warning for warning in loaded.validation_warnings)
     assert any("remote model endpoints are disabled" in warning for warning in loaded.validation_warnings)
+
+    persisted = json.loads(config_file.read_text(encoding="utf-8"))
+    assert "advanced_shell_enabled" not in persisted
+    assert "log_raw_wake_transcripts" not in persisted
 
 
 def test_action_registry_canonicalizes_launch_targets_and_url_metadata(security_workspace_factory):
@@ -75,9 +85,5 @@ def test_action_registry_canonicalizes_launch_targets_and_url_metadata(security_
     assert url_request.metadata["browser"] == "chrome"
     assert url_request.metadata["approved_network"] is True
 
-    shell_request = registry.advanced_shell_request("Get-ChildItem", ActionSource.INTERNAL)
-    assert shell_request.action_type == ActionType.ADVANCED_SHELL
-    assert shell_request.workspace == workspace
-    assert shell_request.external_network is True
-    assert shell_request.write_access is True
-    assert shell_request.budget.subprocess_count == 1
+    search_result_request = registry.open_url_request("https://docs.python.org/3/", "chrome", ActionSource.TYPED, approved_network=True)
+    assert search_result_request.metadata["approved_network"] is True

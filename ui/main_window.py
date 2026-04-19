@@ -35,6 +35,7 @@ class MainWindow(QMainWindow):
     deny_requested = Signal()
     clear_approvals_requested = Signal()
     voice_toggle_requested = Signal()
+    startup_toggle_requested = Signal()
 
     def __init__(self, settings: AppSettings, parent=None) -> None:
         super().__init__(parent)
@@ -87,7 +88,9 @@ class MainWindow(QMainWindow):
         right_column.setContentsMargins(0, 0, 0, 0)
         right_column.addWidget(self._build_context_panel(central))
         right_column.addWidget(self._build_status_panel(central))
+        right_column.addWidget(self._build_internet_panel(central))
         right_column.addWidget(self._build_security_panel(central))
+        right_column.addWidget(self._build_background_panel(central))
         right_column.addWidget(self._build_voice_panel(central))
         right_column.addWidget(self._build_quick_actions_panel(central))
         right_column.addStretch(1)
@@ -214,7 +217,7 @@ class MainWindow(QMainWindow):
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(8)
 
-        for row, key in enumerate(("llm", "voice", "memory", "actions")):
+        for row, key in enumerate(("llm", "voice", "memory", "actions", "internet")):
             name_label = QLabel(key.upper(), frame)
             name_label.setObjectName("infoKey")
             detail_label = QLabel("waiting for health check", frame)
@@ -225,6 +228,34 @@ class MainWindow(QMainWindow):
             grid.addWidget(detail_label, row, 1)
 
         layout.addLayout(grid)
+        return frame
+
+    def _build_internet_panel(self, parent: QWidget) -> QFrame:
+        frame = QFrame(parent)
+        frame.setObjectName("infoPanel")
+
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        title = QLabel("Internet tools", frame)
+        title.setObjectName("panelTitle")
+        subtitle = QLabel("Constrained search and summaries", frame)
+        subtitle.setObjectName("panelAccent")
+        self.internet_detail_label = QLabel("Search, fetch, and summarize stay capped until you use them.", frame)
+        self.internet_detail_label.setObjectName("panelBody")
+        self.internet_detail_label.setWordWrap(True)
+        self.internet_examples_label = QLabel(
+            "Commands: /search <query>, /open-result <n>, /fetch <url-or-n>, /summarize <url-or-n>",
+            frame,
+        )
+        self.internet_examples_label.setObjectName("panelBodyMuted")
+        self.internet_examples_label.setWordWrap(True)
+
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+        layout.addWidget(self.internet_detail_label)
+        layout.addWidget(self.internet_examples_label)
         return frame
 
     def _build_security_panel(self, parent: QWidget) -> QFrame:
@@ -276,6 +307,40 @@ class MainWindow(QMainWindow):
         layout.addLayout(approval_row)
         return frame
 
+    def _build_background_panel(self, parent: QWidget) -> QFrame:
+        frame = QFrame(parent)
+        frame.setObjectName("infoPanel")
+
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        title = QLabel("Background assistant", frame)
+        title.setObjectName("panelTitle")
+        self.background_detail_label = QLabel(
+            "Closing the window keeps JARVIS alive in the tray when the tray is available.",
+            frame,
+        )
+        self.background_detail_label.setObjectName("panelBody")
+        self.background_detail_label.setWordWrap(True)
+        self.background_startup_label = QLabel("Startup on login: off", frame)
+        self.background_startup_label.setObjectName("panelBodyMuted")
+        self.background_toast_label = QLabel(
+            "Windows notifications announce task completion and degraded health while JARVIS runs in the tray.",
+            frame,
+        )
+        self.background_toast_label.setObjectName("panelBodyMuted")
+        self.background_toast_label.setWordWrap(True)
+        self.startup_toggle_button = QPushButton("ENABLE STARTUP", frame)
+        self.startup_toggle_button.setObjectName("quickActionButton")
+
+        layout.addWidget(title)
+        layout.addWidget(self.background_detail_label)
+        layout.addWidget(self.background_startup_label)
+        layout.addWidget(self.background_toast_label)
+        layout.addWidget(self.startup_toggle_button)
+        return frame
+
     def _build_voice_panel(self, parent: QWidget) -> QFrame:
         frame = QFrame(parent)
         frame.setObjectName("infoPanel")
@@ -317,6 +382,8 @@ class MainWindow(QMainWindow):
             ("OPEN EXPLORER", "open file explorer"),
             ("OPEN CHROME", "open google chrome"),
             ("HEALTH CHECK", "/health"),
+            ("SEARCH WEB", "/search qt system tray icon"),
+            ("SUMMARIZE RESULT", "/summarize 1"),
             ("LIST FILES", "/list"),
             ("RUN TESTS", "/run pytest"),
         )
@@ -343,6 +410,7 @@ class MainWindow(QMainWindow):
         self.deny_high_button.clicked.connect(self.deny_high_risk_requested.emit)
         self.clear_approvals_button.clicked.connect(self.clear_approvals_requested.emit)
         self.voice_toggle_button.clicked.connect(self.voice_toggle_requested.emit)
+        self.startup_toggle_button.clicked.connect(self.startup_toggle_requested.emit)
         self.approve_button.clicked.connect(self.approve_requested.emit)
         self.deny_button.clicked.connect(self.deny_requested.emit)
 
@@ -499,6 +567,8 @@ class MainWindow(QMainWindow):
 
         voice_detail = ""
         llm_detail = ""
+        internet_detail = ""
+        internet_state = ""
         for key, label in self._status_detail_labels.items():
             detail = payload.get(key, {}).get("detail", "waiting for health check")
             label.setText(detail)
@@ -506,11 +576,24 @@ class MainWindow(QMainWindow):
                 voice_detail = detail
             elif key == "llm":
                 llm_detail = detail
+            elif key == "internet":
+                internet_detail = detail
+                internet_state = str(payload.get(key, {}).get("state", "unknown"))
 
         if voice_detail:
             self.voice_monitor_label.setText(voice_detail)
-        if llm_detail or voice_detail:
-            summary = " | ".join(part for part in (voice_detail, llm_detail) if part)
+        if internet_detail:
+            self.internet_detail_label.setText(internet_detail)
+        if llm_detail or voice_detail or (internet_state in {"warn", "error"} and internet_detail):
+            summary = " | ".join(
+                part
+                for part in (
+                    voice_detail,
+                    llm_detail,
+                    internet_detail if internet_state in {"warn", "error"} else "",
+                )
+                if part
+            )
             self.runtime_label.setText(summary)
 
     def update_context(self, payload: dict) -> None:
@@ -535,6 +618,9 @@ class MainWindow(QMainWindow):
         active_task = str(payload.get("active_task", "idle"))
         memory_used = int(payload.get("memory_items_used", 0))
         blocked = int(payload.get("sensitive_items_blocked", 0))
+        tray_available = bool(payload.get("tray_available", True))
+        start_on_login = bool(payload.get("start_on_login_enabled", False))
+        startup_detail = str(payload.get("start_on_login_detail", "startup on login is off"))
 
         self.mode_summary_label.setText(
             "Autonomy paused." if paused else (
@@ -550,6 +636,14 @@ class MainWindow(QMainWindow):
         self.active_task_label.setText(f"Active task: {active_task}")
         self.pause_button.setText("RESUME" if paused else "PAUSE")
         self.deny_high_button.setText("ALLOW HIGH" if deny_high else "DENY HIGH")
+        self.background_detail_label.setText(
+            "Tray quick actions: hide or show the window, capture voice, run a health check, open Claude Code, pause, stop, or quit."
+            if tray_available
+            else "System tray is unavailable. Closing the window exits the app instead of keeping it in the background."
+        )
+        self.background_startup_label.setText(f"Startup on login: {'on' if start_on_login else 'off'} | {startup_detail}")
+        self.startup_toggle_button.setText("DISABLE STARTUP" if start_on_login else "ENABLE STARTUP")
+        self.startup_toggle_button.setEnabled(True)
         self.status_badges.update_policy_badges(payload, self._approvals_payload)
 
     def update_approval_state(self, payload: dict) -> None:

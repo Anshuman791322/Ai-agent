@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from config.settings import AppSettings
-from security.models import ActionBudget, HandoffEnvelope
+from security.models import ActionBudget, HandoffEnvelope, HandoffType
 from security.redaction import sanitize_for_log
 
 
@@ -161,7 +161,12 @@ class SystemActions:
     async def launch_claude_interactive(self) -> ActionResult:
         return await asyncio.to_thread(self._launch_claude_code_sync)
 
-    async def run_claude_code_task(self, envelope: HandoffEnvelope, timeout: int = 240) -> ActionResult:
+    async def execute_secured_claude_handoff(self, envelope: HandoffEnvelope, timeout: int = 240) -> ActionResult:
+        if not self._looks_like_secured_claude_handoff(envelope):
+            return ActionResult(False, "Claude Code handoff was rejected before execution.")
+        return await self._run_claude_handoff_subprocess(envelope, timeout)
+
+    async def _run_claude_handoff_subprocess(self, envelope: HandoffEnvelope, timeout: int) -> ActionResult:
         workspace = next((path for path in envelope.allowed_paths if path.exists()), None)
         before = self._git_changed_files(workspace)
         process = await asyncio.create_subprocess_exec(
@@ -207,39 +212,7 @@ class SystemActions:
         )
 
     async def run_advanced_shell(self, command: str, timeout: int = 180) -> ActionResult:
-        if self.settings is None or not self.settings.advanced_shell_enabled:
-            return ActionResult(False, "Advanced shell access is disabled by policy.")
-
-        shell = shutil.which("powershell") or shutil.which("pwsh")
-        if not shell:
-            return ActionResult(False, "PowerShell was not found on this machine.")
-
-        workspace = self._claude_workspace()
-        process = await asyncio.create_subprocess_exec(
-            shell,
-            "-NoProfile",
-            "-Command",
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(workspace) if workspace is not None else None,
-            creationflags=self._no_window_flags(),
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            process.kill()
-            return ActionResult(False, "Advanced shell command timed out.")
-        except asyncio.CancelledError:
-            process.kill()
-            await process.communicate()
-            raise
-
-        output = stdout.decode(errors="ignore").strip()
-        error = stderr.decode(errors="ignore").strip()
-        if process.returncode != 0:
-            return ActionResult(False, error or "Advanced shell command failed.", output=output[:2400])
-        return ActionResult(True, "Advanced shell command completed.", output=output[:2400])
+        return ActionResult(False, "Advanced shell access is not available in this build.")
 
     def canonicalize_launch_target(self, target: str) -> str | None:
         normalized = self._normalize_target(target)
@@ -495,6 +468,23 @@ class SystemActions:
         if len(cleaned) <= 3200:
             return f"Claude Code:\n{cleaned}"
         return f"Claude Code:\n{cleaned[:3200].rstrip()}\n\n[output truncated]"
+
+    @staticmethod
+    def _looks_like_secured_claude_handoff(envelope: HandoffEnvelope) -> bool:
+        if envelope.handoff_type != HandoffType.CLAUDE_CODE:
+            return False
+        if envelope.context.recent_chat:
+            return False
+        if envelope.prompt_chars != len(envelope.prompt):
+            return False
+        if len(envelope.command) < 3:
+            return False
+        cli_name = Path(envelope.command[0]).name.lower()
+        if cli_name not in {"claude", "claude.exe"}:
+            return False
+        if envelope.command[1] != "-p":
+            return False
+        return envelope.command[-1] == envelope.prompt
 
     def _git_changed_files(self, workspace: Path | None) -> set[str]:
         git_exe = shutil.which("git")

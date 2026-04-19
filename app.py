@@ -16,7 +16,9 @@ from config.settings import AppSettings
 from core.app_state import AppState
 from core.event_bus import EventBus
 from core.orchestrator import Orchestrator
+from integrations.web_tools import ConstrainedWebTools
 from integrations.windows_context import WindowsContextProbe
+from integrations.windows_startup import WindowsStartupRegistration
 from memory.store import MemoryStore
 from providers.llm.ollama_provider import OllamaProvider
 from resources import load_app_icon
@@ -32,6 +34,10 @@ from voice.stt_whisper import WhisperSTT
 
 
 log = logging.getLogger(__name__)
+
+
+def launch_in_background(argv: list[str]) -> bool:
+    return any(arg == "--background" for arg in argv[1:])
 
 
 def configure_logging(log_file: Path | None) -> None:
@@ -141,6 +147,7 @@ class SingleInstanceGuard(QObject):
 
 class AppBootstrap:
     def __init__(self) -> None:
+        self._start_in_background = launch_in_background(sys.argv)
         self.settings: AppSettings | None = None
         self.app: QApplication | None = None
         self.bus: EventBus | None = None
@@ -157,6 +164,8 @@ class AppBootstrap:
         self.registry: ActionRegistry | None = None
         self.context_probe: WindowsContextProbe | None = None
         self.orchestrator: Orchestrator | None = None
+        self.startup_manager: WindowsStartupRegistration | None = None
+        self.web_tools: ConstrainedWebTools | None = None
         self.window: MainWindow | None = None
         self.tray: SystemTrayController | None = None
         self.dispatch_timer: QTimer | None = None
@@ -260,6 +269,9 @@ class AppBootstrap:
         self.llm = OllamaProvider(self.settings)
         self.voice = WhisperSTT(self.settings)
         self.actions = SystemActions(self.settings)
+        self.web_tools = ConstrainedWebTools()
+        self.startup_manager = WindowsStartupRegistration(self.settings.app_name, Path(__file__))
+        self.startup_manager.sync_enabled(self.settings.start_on_login)
         self.registry = ActionRegistry(
             self.settings,
             self.actions,
@@ -283,6 +295,8 @@ class AppBootstrap:
             self.context_manager,
             self.jail,
             self.context_probe,
+            self.web_tools,
+            self.startup_manager,
         )
 
         icon = load_app_icon()
@@ -298,7 +312,11 @@ class AppBootstrap:
             pause_callback=self.orchestrator.toggle_autonomy_pause,
             stop_callback=self.orchestrator.stop_active_task,
             show_approvals_callback=None,
+            voice_capture_callback=self.orchestrator.submit_voice_capture,
+            health_check_callback=self.orchestrator.refresh_health,
+            open_claude_callback=lambda: self.orchestrator.submit_text("open claude code"),
         )
+        self.orchestrator.set_notifier(self.tray)
         tray_available = self.tray.is_available()
         self.window.set_hide_to_tray(tray_available)
         self.app.setQuitOnLastWindowClosed(not tray_available)
@@ -323,6 +341,7 @@ class AppBootstrap:
         self.window.deny_requested.connect(self.orchestrator.deny_pending)
         self.window.clear_approvals_requested.connect(self.orchestrator.clear_pending_approvals)
         self.window.voice_toggle_requested.connect(self.orchestrator.toggle_voice_activation)
+        self.window.startup_toggle_requested.connect(self.orchestrator.toggle_startup_on_login)
 
     def _create_timers(self) -> None:
         self.dispatch_timer = QTimer(self.app)
@@ -346,11 +365,19 @@ class AppBootstrap:
 
     def _finalize_startup(self) -> None:
         self.window.update_statuses(self.state.snapshot_statuses())
-        self.window.show_and_focus()
         self.dispatch_timer.start()
         self.health_timer.start()
         if self.context_timer is not None:
             self.context_timer.start()
+        if self._start_in_background and self.tray is not None and self.tray.is_available():
+            self.window.hide()
+            self.tray.sync_state()
+            self.tray.notify(
+                self.settings.app_name,
+                "Started in the tray. Voice capture, health check, and Claude Code are available from the tray menu.",
+            )
+        else:
+            self.window.show_and_focus()
         QTimer.singleShot(0, self._start_orchestrator)
 
     def _start_orchestrator(self) -> None:

@@ -2,18 +2,21 @@
 
 Windows-first, local-first desktop assistant built with Python and PySide6.
 
-It keeps the native desktop UI, tray behavior, local Ollama, local Whisper, Claude Code integration, and voice activation, but now runs with bounded autonomy instead of free-form command execution.
+It keeps the native desktop UI, tray behavior, local Ollama, local Whisper, Claude Code integration, voice activation, and now a constrained internet path, but still runs with bounded autonomy instead of free-form command execution.
 
 ## What this app does
 
 - Native Windows desktop UI with a retro terminal look
-- Qt system tray icon with hide, show, pause, stop, and quit actions
+- Qt system tray icon with hide/show, voice capture, health check, open Claude Code, pause, stop, and quit actions
+- Explicit opt-in startup-on-login that launches the packaged app hidden in the tray
+- Native Windows notifications for background task completion and degraded subsystem health
 - Local reasoning through Ollama
 - Local speech-to-text through faster-whisper
 - Always-on voice activation on Windows using the wake phrase `Jarvis`
 - Local SQLite chat and memory store
 - Policy-based action execution with approval only for higher-risk work
 - Safer Claude Code handoff with scoped paths, prompt sanitization, and audit logs
+- Constrained web search, fetch, open-result, and summarize tools with deterministic routing before Ollama
 - Packaging support with PyInstaller and an Inno Setup installer
 
 ## Quick start
@@ -49,6 +52,7 @@ python app.py
 - Voice transcription uses `base.en`.
 - Voice activation is enabled by default. Say `Jarvis` and then the command.
 - Ollama uses `qwen3.5:0.8b` by default.
+- Startup on login is off by default and must be enabled explicitly from the UI or `/startup on`.
 - Claude Code launches in `C:\Users\anshu\Downloads\Codex`.
 - Settings, logs, audit history, and SQLite state live under `%LOCALAPPDATA%\JarvisWindowsLocal`.
 - `requirements.txt` is the runtime dependency floor, `requirements-dev.txt` is for local tooling, and `requirements.lock` is the current pinned Windows snapshot.
@@ -76,9 +80,11 @@ The assistant is designed for bounded autonomy, not constant confirmation.
 - Listing workspace files
 - Opening approved app aliases such as Explorer, Chrome, PowerShell, VS Code, and Claude Code
 - Opening approved browser destinations
+- Constrained web search, readable fetch, and page summaries through the built-in internet tools
+- Opening a numbered cached search result in Chrome
 - Running curated repo-local commands such as `pytest`, `ruff-check`, and `ruff-format`
-- Local Ollama reasoning with minimal scoped context
-- Claude Code tasks inside the approved workspace when the handoff stays within policy budget and does not include sensitive context
+- Local Ollama reasoning with a fixed base system prompt plus explicit untrusted reference notes when context is enabled
+- Claude Code tasks inside the approved workspace when the handoff stays within policy budget, passes envelope validation, and does not include sensitive context
 
 ### What asks for approval
 
@@ -86,7 +92,6 @@ The assistant is designed for bounded autonomy, not constant confirmation.
 - Writes outside the allowlisted workspace
 - High-risk file access in sensitive locations
 - Unknown executable launches
-- Arbitrary shell or PowerShell execution
 - Destructive or potentially destructive operations
 - Actions that exceed policy budgets
 - External handoff that would include sensitive local data
@@ -95,7 +100,7 @@ The assistant is designed for bounded autonomy, not constant confirmation.
 
 - Critical-risk actions
 - Forbidden-zone access
-- Advanced shell execution when `advanced_shell_enabled` is false
+- Legacy advanced shell execution and arbitrary PowerShell command routing
 - Remote model endpoints unless explicitly enabled in settings
 
 ## Claude Code handoff rules
@@ -112,15 +117,18 @@ Each handoff now builds a structured envelope with:
 - instructions not to read secrets, browser/session data, SSH keys, token stores, or unrelated files
 - a required response shape with summary and changed file references
 
+The runtime validates that envelope before launching Claude Code. If the command shape, task scope, or context budget is wrong, the handoff is blocked before any subprocess starts.
+
 Sensitive-tagged memory is never injected into Claude automatically.
 
 ## Memory and privacy behavior
 
 - Memory entries are tagged as `safe`, `general`, or `sensitive`
 - Sensitive memory is not injected into Claude handoff automatically
-- Raw wake transcripts are not logged by default
+- Raw wake transcripts are not logged or stored
 - Conversation and memory text are redacted for likely secrets before being stored
 - Memory can be listed and deleted from the built-in commands
+- Desktop context and memory notes are passed to Ollama as explicit untrusted reference messages, not concatenated into the base system prompt
 - Audit logs record decisions and actions without dumping full sensitive prompts unless debug logging is explicitly enabled
 
 ## UI and control behavior
@@ -132,7 +140,9 @@ The UI shows:
 - whether context or memory were used for the current request
 - current Claude handoff state
 - pending approval count
-- subsystem health
+- subsystem health, including the internet path
+- background assistant status, startup-on-login state, and tray behavior
+- the explicit internet command surface for search, fetch, and summarize
 
 Emergency controls:
 
@@ -141,6 +151,21 @@ Emergency controls:
 - stop the active task
 - clear pending approvals
 - disable voice activation temporarily
+
+### Background assistant behavior
+
+- Closing the window hides JARVIS to the tray when the Windows tray is available.
+- Enabling startup on login writes a per-user `Run` entry that starts JARVIS with `--background`, so the app comes up hidden in the tray instead of stealing focus.
+- Tray notifications surface important completions such as workspace command or Claude Code task completion, plus subsystem degradations after startup.
+
+### Internet tools behavior
+
+- `/search` runs a constrained DuckDuckGo HTML search and caches a small numbered result list locally.
+- `/open-result <n>` opens a cached result in Chrome.
+- `/fetch <url-or-n>` downloads readable page text only and keeps the response short.
+- `/summarize <url-or-n>` produces a short deterministic local summary from the fetched page instead of handing the task straight to Ollama.
+- Natural commands such as `search the web for ...`, `open result 1`, `fetch page 2`, and `summarize https://...` route into the same tool path before model inference.
+- Requests fail cleanly when the network is unavailable or the target is not a public HTTP(S) page.
 
 ## Built-in console commands
 
@@ -154,6 +179,11 @@ Emergency controls:
 - `/clear-approvals`
 - `/stop`
 - `/voice`
+- `/startup <on|off|status>`
+- `/search <query>`
+- `/open-result <n>`
+- `/fetch <url-or-result-number>`
+- `/summarize <url-or-result-number>`
 - `/remember <note>`
 - `/remember-sensitive <note>`
 - `/memories`
@@ -162,7 +192,6 @@ Emergency controls:
 - `/list [path]`
 - `/preview <file>`
 - `/run <pytest|ruff-check|ruff-format>`
-- `/ps <command>`: approval-gated advanced shell path, disabled by default
 
 ## Local tooling and security checks
 
@@ -223,9 +252,13 @@ The packaged app does not write logs, settings, audit logs, temp task scopes, or
 
 - `%LOCALAPPDATA%\JarvisWindowsLocal`
 
+If startup on login is enabled, the packaged build registers the installed executable under the current user `Run` key and starts it with `--background`, which keeps the flow compatible with the existing PyInstaller and Inno Setup output.
+
 ### Troubleshooting packaged builds
 
 - If the tray icon is missing, confirm `assets\app_icon.ico` was bundled and the build completed from `jarvis_local.spec`.
+- If startup on login does not stick, confirm the app can write the current user `Run` key and that you enabled it from the background assistant panel or `/startup on`.
+- If internet tools show degraded health, check basic network access and retry `/search`; the feature fails closed when it cannot reach the network.
 - If the app fails before the window opens, check `%LOCALAPPDATA%\JarvisWindowsLocal\jarvis.log`.
 - If Ollama health is degraded, make sure Ollama is running on `127.0.0.1:11434` and the configured model is installed.
 - If Whisper health is degraded, reinstall the environment and rebuild so the faster-whisper native dependencies are included.
