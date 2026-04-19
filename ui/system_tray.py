@@ -6,11 +6,12 @@ from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 
 class SystemTrayController:
-    def __init__(self, app, window) -> None:
+    def __init__(self, app, window, icon: QIcon | None = None, tooltip: str = "JARVIS Local") -> None:
         self.app = app
         self.window = window
-        self.tray = QSystemTrayIcon(self._build_icon(), window)
-        self.tray.setToolTip("JARVIS Local")
+        self._available = QSystemTrayIcon.isSystemTrayAvailable()
+        self.tray = QSystemTrayIcon(icon if icon is not None and not icon.isNull() else self._build_icon(), window)
+        self.tray.setToolTip(tooltip)
 
         menu = QMenu()
         self.toggle_action = QAction("Hide", menu)
@@ -26,11 +27,11 @@ class SystemTrayController:
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._handle_activation)
 
-        if QSystemTrayIcon.isSystemTrayAvailable():
+        if self._available:
             self.tray.show()
 
     def is_available(self) -> bool:
-        return QSystemTrayIcon.isSystemTrayAvailable()
+        return self._available
 
     def toggle_window(self) -> None:
         if self.window.isVisible():
@@ -38,15 +39,23 @@ class SystemTrayController:
             self.toggle_action.setText("Show")
             return
 
-        self.window.show()
-        self.window.raise_()
-        self.window.activateWindow()
+        self.window.show_and_focus()
         self.toggle_action.setText("Hide")
 
     def quit_application(self) -> None:
         self.window.prepare_to_quit()
-        self.tray.hide()
+        self.shutdown()
         self.app.quit()
+
+    def sync_state(self) -> None:
+        if self.window.isVisible():
+            self.toggle_action.setText("Hide")
+        else:
+            self.toggle_action.setText("Show")
+
+    def shutdown(self) -> None:
+        if self.tray is not None:
+            self.tray.hide()
 
     def _handle_activation(self, reason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:

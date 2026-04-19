@@ -7,3 +7,5 @@ __pycache__/
 venv/
 build/
 dist/
+installer-output/
+installed_ui_check*.png

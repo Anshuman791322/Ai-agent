@@ -14,13 +14,14 @@ class CommandInputWidget(QFrame):
 
         self.line_edit = QLineEdit(self)
         self.line_edit.setObjectName("commandLineEdit")
-        self.line_edit.setPlaceholderText("Type a command, ask a question, or use /help")
+        self.line_edit.setPlaceholderText("Type here, or say 'Jarvis' and then your command. PTT is fallback only.")
 
         self.send_button = QPushButton("SEND", self)
         self.send_button.setObjectName("commandSendButton")
 
-        self.voice_button = QPushButton("VOICE", self)
+        self.voice_button = QPushButton("PTT", self)
         self.voice_button.setObjectName("commandVoiceButton")
+        self.voice_button.setToolTip("Fallback push-to-talk capture")
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
