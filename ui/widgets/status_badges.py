@@ -13,7 +13,7 @@ class StatusBadgesWidget(QFrame):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        for key in ("llm", "voice", "memory", "actions", "internet", "auto", "zone", "approvals"):
+        for key in ("llm", "voice", "memory", "actions", "internet", "routines", "auto", "zone", "approvals"):
             label = QLabel(key.upper(), self)
             label.setObjectName("statusBadge")
             label.setProperty("state", "unknown")
@@ -23,7 +23,7 @@ class StatusBadgesWidget(QFrame):
         layout.addStretch(1)
 
     def update_badges(self, statuses: dict[str, dict]) -> None:
-        for key in ("llm", "voice", "memory", "actions", "internet"):
+        for key in ("llm", "voice", "memory", "actions", "internet", "routines"):
             label = self._labels[key]
             payload = statuses.get(key, {})
             state = payload.get("state", "unknown")

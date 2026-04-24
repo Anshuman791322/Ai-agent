@@ -17,6 +17,7 @@ It keeps the native desktop UI, tray behavior, local Ollama, local Whisper, Clau
 - Policy-based action execution with approval only for higher-risk work
 - Safer Claude Code handoff with scoped paths, prompt sanitization, and audit logs
 - Constrained web search, fetch, open-result, and summarize tools with deterministic routing before Ollama
+- Lightweight local routines with starter presets and recent-run history
 - Packaging support with PyInstaller and an Inno Setup installer
 
 ## Quick start
@@ -55,6 +56,7 @@ python app.py
 - Startup on login is off by default and must be enabled explicitly from the UI or `/startup on`.
 - Claude Code launches in `C:\Users\anshu\Downloads\Codex`.
 - Settings, logs, audit history, and SQLite state live under `%LOCALAPPDATA%\JarvisWindowsLocal`.
+- Local routines are stored in `%LOCALAPPDATA%\JarvisWindowsLocal\routines.json`.
 - `requirements.txt` is the runtime dependency floor, `requirements-dev.txt` is for local tooling, and `requirements.lock` is the current pinned Windows snapshot.
 
 ## Security model
@@ -141,8 +143,17 @@ The UI shows:
 - current Claude handoff state
 - pending approval count
 - subsystem health, including the internet path
+- routine availability, last routine status, and recent routine runs
 - background assistant status, startup-on-login state, and tray behavior
 - the explicit internet command surface for search, fetch, and summarize
+
+### Routine behavior
+
+- Routines are local JSON definitions that replay curated action-registry steps instead of arbitrary shell text.
+- Every step still goes through the same policy engine, trust-zone checks, approvals, and audit trail as a normal typed or voice command.
+- The built-in starters are `Work Mode`, `Stream Mode`, and `Gaming Mode`.
+- Starter routines stay lightweight by using existing safe actions such as approved apps, approved URLs, and workspace Explorer opens.
+- Recent routine outcomes are kept locally and shown in the UI so you can see whether a routine completed, failed, or paused for approval.
 
 Emergency controls:
 
@@ -188,10 +199,24 @@ Emergency controls:
 - `/remember-sensitive <note>`
 - `/memories`
 - `/forget <memory-id>`
+- `/routines`
+- `/run-routine <name>`
+- `/save-routine <name> :: <step>; <step>; ...`
+- `/delete-routine <name>`
 - `/open <url-or-path>`
 - `/list [path]`
 - `/preview <file>`
 - `/run <pytest|ruff-check|ruff-format>`
+
+Routine step syntax:
+
+- `open-app:<alias>`
+- `open-url:<target>`
+- `open-explorer:<path-or-workspace>`
+- `list[:path-or-workspace]`
+- `preview:<file>`
+- `run:<pytest|ruff-check|ruff-format>`
+- `claude:<task>`
 
 ## Local tooling and security checks
 

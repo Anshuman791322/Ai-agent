@@ -22,6 +22,7 @@ from integrations.windows_startup import WindowsStartupRegistration
 from memory.store import MemoryStore
 from providers.llm.ollama_provider import OllamaProvider
 from resources import load_app_icon
+from routines import RoutineService, RoutineStore
 from security.approvals import ApprovalManager
 from security.audit import AuditLogger
 from security.context_manager import ContextManager
@@ -166,6 +167,8 @@ class AppBootstrap:
         self.orchestrator: Orchestrator | None = None
         self.startup_manager: WindowsStartupRegistration | None = None
         self.web_tools: ConstrainedWebTools | None = None
+        self.routine_store: RoutineStore | None = None
+        self.routine_service: RoutineService | None = None
         self.window: MainWindow | None = None
         self.tray: SystemTrayController | None = None
         self.dispatch_timer: QTimer | None = None
@@ -270,6 +273,7 @@ class AppBootstrap:
         self.voice = WhisperSTT(self.settings)
         self.actions = SystemActions(self.settings)
         self.web_tools = ConstrainedWebTools()
+        self.routine_store = RoutineStore(self.settings.routines_file)
         self.startup_manager = WindowsStartupRegistration(self.settings.app_name, Path(__file__))
         self.startup_manager.sync_enabled(self.settings.start_on_login)
         self.registry = ActionRegistry(
@@ -278,6 +282,7 @@ class AppBootstrap:
             self.jail,
             HandoffManager(self.settings, self.jail, self.context_manager),
         )
+        self.routine_service = RoutineService(self.routine_store, self.registry)
         self.policy = PolicyEngine(self.settings, self.jail)
         self.context_probe = WindowsContextProbe()
         self.orchestrator = Orchestrator(
@@ -297,6 +302,7 @@ class AppBootstrap:
             self.context_probe,
             self.web_tools,
             self.startup_manager,
+            self.routine_service,
         )
 
         icon = load_app_icon()
@@ -329,6 +335,7 @@ class AppBootstrap:
         self.bus.subscribe("context", self.window.update_context)
         self.bus.subscribe("policy", self.window.update_policy_state)
         self.bus.subscribe("approvals", self.window.update_approval_state)
+        self.bus.subscribe("routines", self.window.update_routines)
 
         self.window.command_input.submitted.connect(self.orchestrator.submit_text)
         self.window.command_input.voice_requested.connect(self.orchestrator.submit_voice_capture)
@@ -365,6 +372,8 @@ class AppBootstrap:
 
     def _finalize_startup(self) -> None:
         self.window.update_statuses(self.state.snapshot_statuses())
+        if self.routine_service is not None:
+            self.window.update_routines(self.routine_service.snapshot())
         self.dispatch_timer.start()
         self.health_timer.start()
         if self.context_timer is not None:

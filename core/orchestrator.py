@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import dataclass
+from datetime import datetime, timezone
 import logging
 import re
 import threading
@@ -18,6 +20,13 @@ from integrations.windows_startup import WindowsStartupRegistration
 from memory.store import MemoryStore
 from providers.llm.base import ChatMessage
 from providers.llm.ollama_provider import OllamaProvider
+from routines import (
+    RoutineExecutionResult,
+    RoutineNotFoundError,
+    RoutineService,
+    RoutineStepResult,
+    RoutineValidationError,
+)
 from security.approvals import ApprovalManager
 from security.audit import AuditLogger
 from security.context_manager import ContextBundle, ContextManager
@@ -42,6 +51,14 @@ from voice.stt_whisper import WhisperSTT
 log = logging.getLogger(__name__)
 
 
+@dataclass(slots=True)
+class PolicyExecutionOutcome:
+    disposition: str
+    message: str
+    decision: PolicyDecision
+    result: ActionResult | None = None
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -61,6 +78,7 @@ class Orchestrator:
         context_probe: WindowsContextProbe | None = None,
         web_tools: ConstrainedWebTools | None = None,
         startup_manager: WindowsStartupRegistration | None = None,
+        routine_service: RoutineService | None = None,
     ) -> None:
         self.settings = settings
         self.state = state
@@ -78,6 +96,7 @@ class Orchestrator:
         self.context_probe = context_probe
         self.web_tools = web_tools
         self.startup_manager = startup_manager
+        self.routine_service = routine_service
 
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="jarvis-orchestrator")
@@ -103,6 +122,8 @@ class Orchestrator:
         self._running = True
         self._thread.start()
         self._publish_log("system", "Boot sequence complete. Bounded autonomy is coming online.")
+        if self.routine_service is not None:
+            self.state.set_status("routines", "ok", f"{len(self.routine_service.list_routines())} local routines ready")
         self._start_voice_activation()
         if self.settings.desktop_context_enabled:
             self.refresh_context()
@@ -112,6 +133,7 @@ class Orchestrator:
         self.refresh_health()
         self._publish_policy_state()
         self._publish_approval_state()
+        self._publish_routines_state()
 
     def shutdown(self) -> None:
         if self._voice_listener is not None:
@@ -280,7 +302,8 @@ class Orchestrator:
                 "/remember-sensitive <note>, /memories, /forget <id>, /approve, /deny, /pause, /deny-high, "
                 "/stop, /voice, /startup <on|off|status>, /search <query>, /open-result <n>, "
                 "/fetch <url-or-n>, /summarize <url-or-n>, /open <target>, /list [path], "
-                "/preview <file>, /run <pytest|ruff-check|ruff-format>."
+                "/preview <file>, /run <pytest|ruff-check|ruff-format>, /routines, "
+                "/run-routine <name>, /save-routine <name> :: <step>; <step>, /delete-routine <name>."
             )
 
         if command == "/health":
@@ -349,6 +372,24 @@ class Orchestrator:
         if command == "/summarize":
             return await self._run_web_tool("summarize", args, source)
 
+        if command == "/routines":
+            return self._list_routines_message()
+
+        if command == "/run-routine":
+            if not args:
+                return "Usage: /run-routine <name>"
+            return await self._run_routine_by_name(args, source)
+
+        if command == "/save-routine":
+            if not args:
+                return "Usage: /save-routine <name> :: <step>; <step>; ..."
+            return self._save_routine_definition(args, source)
+
+        if command == "/delete-routine":
+            if not args:
+                return "Usage: /delete-routine <name>"
+            return self._delete_routine(args, source)
+
         if command == "/remember":
             if not args:
                 return "Nothing to store."
@@ -398,6 +439,180 @@ class Orchestrator:
             return await self._execute_policy_request(request)
 
         return "Unknown command. Use /help for the local command set."
+
+    def _list_routines_message(self) -> str:
+        if self.routine_service is None:
+            return "Routine support is unavailable in this session."
+        routines = self.routine_service.list_routines()
+        if not routines:
+            return "No routines are stored."
+        lines = ["Local routines:"]
+        for routine in routines:
+            lines.append(f"- {routine.name} ({len(routine.steps)} steps): {routine.description or 'custom routine'}")
+        recent = self.routine_service.recent_runs(3)
+        if recent:
+            lines.append("")
+            lines.append("Recent runs:")
+            for item in recent:
+                finished_at = str(item.get("finished_at", "")).replace("T", " ").replace("Z", " UTC")
+                lines.append(f"- {item.get('name', 'routine')} [{item.get('status', 'unknown')}] {finished_at}")
+        return "\n".join(lines)
+
+    def _save_routine_definition(self, args: str, source: ActionSource) -> str:
+        if self.routine_service is None:
+            return "Routine support is unavailable in this session."
+        try:
+            routine = self.routine_service.save_from_inline_command(args)
+        except RoutineValidationError as exc:
+            return str(exc)
+
+        self.state.set_status("routines", "ok", f"saved routine {routine.name}")
+        self._publish_status()
+        self._publish_routines_state(status=f"saved routine {routine.name}")
+        self.audit.record(
+            AuditEntry(
+                event_type="routine_saved",
+                source=source,
+                message=f"Saved routine {routine.name}",
+                action_type="routine_definition",
+                decision="stored",
+                risk="low",
+                target=routine.name,
+                metadata={"steps": len(routine.steps)},
+            )
+        )
+        return (
+            f"Saved routine {routine.name} with {len(routine.steps)} steps.\n"
+            "Step syntax: open-app:<alias>; open-url:<target>; open-explorer:<path>; "
+            "list[:path]; preview:<file>; run:<command>; claude:<task>."
+        )
+
+    def _delete_routine(self, name: str, source: ActionSource) -> str:
+        if self.routine_service is None:
+            return "Routine support is unavailable in this session."
+        removed = self.routine_service.delete_routine(name)
+        if not removed:
+            return f"Routine {name!r} was not found."
+        self.state.set_status("routines", "ok", f"deleted routine {name.strip()}")
+        self._publish_status()
+        self._publish_routines_state(status=f"deleted routine {name.strip()}")
+        self.audit.record(
+            AuditEntry(
+                event_type="routine_deleted",
+                source=source,
+                message=f"Deleted routine {name.strip()}",
+                action_type="routine_definition",
+                decision="deleted",
+                risk="low",
+                target=name.strip(),
+            )
+        )
+        return f"Deleted routine {name.strip()}."
+
+    async def _run_routine_by_name(self, name: str, source: ActionSource) -> str:
+        if self.routine_service is None:
+            return "Routine support is unavailable in this session."
+        try:
+            routine = self.routine_service.get_routine(name)
+        except RoutineNotFoundError:
+            return f"Routine {name!r} was not found. Use /routines to list what is available."
+
+        started_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        total_steps = len(routine.steps)
+        step_results: list[RoutineStepResult] = []
+        final_status = "success"
+        self._publish_log("system", f"Running routine {routine.name} ({total_steps} steps).")
+        self.state.set_status("routines", "busy", f"running {routine.name} (0/{total_steps})")
+        self._publish_status()
+        self._publish_routines_state(active_routine=routine.name, status=f"running {routine.name}")
+
+        for index, step in enumerate(routine.steps, start=1):
+            self.state.set_status("routines", "busy", f"running {routine.name} ({index}/{total_steps})")
+            self._publish_status()
+            try:
+                request = self.routine_service.build_request(step, ActionSource.ROUTINE)
+            except RoutineValidationError as exc:
+                step_results.append(RoutineStepResult(index, step.label or step.kind.value, "failed", str(exc)))
+                final_status = "failed"
+                break
+
+            outcome = await self._execute_policy_request_outcome(request)
+            step_status = "success" if outcome.disposition == "executed" else outcome.disposition
+            step_results.append(
+                RoutineStepResult(
+                    index=index,
+                    label=step.label or step.kind.value,
+                    status=step_status,
+                    message=outcome.message,
+                )
+            )
+            if outcome.disposition != "executed":
+                final_status = outcome.disposition
+                break
+
+        finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        success_count = sum(1 for item in step_results if item.status == "success")
+        if final_status == "success":
+            summary = f"Routine {routine.name} completed ({success_count}/{total_steps} steps)."
+            state = "ok"
+            notification_level = "info"
+        elif final_status == "approval_required":
+            summary = f"Routine {routine.name} needs approval at step {len(step_results)}."
+            state = "warn"
+            notification_level = "warn"
+        elif final_status == "blocked":
+            summary = f"Routine {routine.name} was blocked by policy at step {len(step_results)}."
+            state = "error"
+            notification_level = "error"
+        elif final_status == "cancelled":
+            summary = f"Routine {routine.name} was cancelled."
+            state = "warn"
+            notification_level = "warn"
+        else:
+            summary = f"Routine {routine.name} failed at step {len(step_results)}."
+            state = "error"
+            notification_level = "error"
+
+        execution = RoutineExecutionResult(
+            name=routine.name,
+            status=final_status,
+            summary=summary,
+            step_results=step_results,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+        self.routine_service.record_execution(execution)
+        detail = (
+            f"last run {routine.name}: {success_count}/{total_steps} steps completed"
+            if final_status == "success"
+            else f"{routine.name}: {final_status.replace('_', ' ')}"
+        )
+        self.state.set_status("routines", state, detail)
+        self._publish_status()
+        self._publish_routines_state(status=summary)
+        self.audit.record(
+            AuditEntry(
+                event_type="routine_execution",
+                source=source,
+                message=summary,
+                action_type="routine",
+                decision=final_status,
+                risk="low" if final_status == "success" else "medium",
+                target=routine.name,
+                metadata={
+                    "steps_total": total_steps,
+                    "steps_successful": success_count,
+                    "step_results": [item.to_dict() for item in step_results],
+                },
+            )
+        )
+        self._notify("Routine finished" if final_status == "success" else "Routine update", summary, notification_level)
+
+        lines = [summary]
+        for item in step_results:
+            headline = item.message.splitlines()[0] if item.message else item.status
+            lines.append(f"{item.index}. {item.label} [{item.status}] {headline}")
+        return "\n".join(lines)
 
     async def _generate_llm_response(self, text: str, source: ActionSource) -> str:
         selection = self.context_manager.infer_selection(text, include_recent_chat=True)
@@ -464,6 +679,17 @@ class Orchestrator:
             "disable start with windows",
         }:
             return await self._set_startup_on_login(False)
+
+        if normalized in {"show routines", "list routines", "what routines do you have", "available routines"}:
+            return self._list_routines_message()
+
+        routine_match = re.match(
+            r"^(?:run|start|launch|execute)\s+(?:the\s+)?routine\s+(?P<name>.+)$",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if routine_match:
+            return await self._run_routine_by_name(routine_match.group("name"), source)
 
         search_query = self._extract_web_search_query(text)
         if search_query:
@@ -553,6 +779,9 @@ class Orchestrator:
         return None
 
     async def _execute_policy_request(self, request: ActionRequest) -> str:
+        return (await self._execute_policy_request_outcome(request)).message
+
+    async def _execute_policy_request_outcome(self, request: ActionRequest) -> PolicyExecutionOutcome:
         decision = self.policy.evaluate(request)
         self.audit.record(self._policy_audit_entry(request, decision))
 
@@ -566,7 +795,7 @@ class Orchestrator:
                 f"Reason: {decision.reasons[0]}"
             )
             self._publish_log("system", message)
-            return message
+            return PolicyExecutionOutcome("blocked", message, decision)
 
         if decision.decision == PolicyDecisionType.REQUIRE_APPROVAL:
             pending = self.approvals.submit(
@@ -580,9 +809,9 @@ class Orchestrator:
                 f"Reason: {decision.reasons[0]}"
             )
             self._publish_log("system", message)
-            return message
+            return PolicyExecutionOutcome("approval_required", message, decision)
 
-        return await self._run_action(request, decision)
+        return await self._run_action_outcome(request, decision)
 
     async def _run_approved_action(self, request: ActionRequest, decision: PolicyDecision) -> str:
         self.audit.record(
@@ -604,9 +833,12 @@ class Orchestrator:
             )
         )
         self._publish_approval_state()
-        return await self._run_action(request, decision)
+        return (await self._run_action_outcome(request, decision)).message
 
     async def _run_action(self, request: ActionRequest, decision: PolicyDecision) -> str:
+        return (await self._run_action_outcome(request, decision)).message
+
+    async def _run_action_outcome(self, request: ActionRequest, decision: PolicyDecision) -> PolicyExecutionOutcome:
         self._active_task_label = request.description
         self._publish_policy_state(trust_zone=decision.trust_zone.value)
         action_task = asyncio.create_task(self.registry.execute(request, self._desktop_context))
@@ -620,7 +852,7 @@ class Orchestrator:
             self._last_handoff_status = "cancelled"
             self._active_task_label = "idle"
             self._publish_policy_state(trust_zone=decision.trust_zone.value)
-            return "Active task cancelled."
+            return PolicyExecutionOutcome("cancelled", "Active task cancelled.", decision)
         finally:
             self._active_task = None
             self._active_task_label = "idle"
@@ -633,12 +865,18 @@ class Orchestrator:
         if request.action_type == ActionType.CLAUDE_TASK:
             changed_files = result.details.get("changed_files", [])
             if len(changed_files) > self.settings.max_files_modified_per_task:
-                return (
-                    f"{result.message}\n\nWarning: Claude Code changed {len(changed_files)} files, "
-                    f"which exceeded the configured budget of {self.settings.max_files_modified_per_task}."
+                return PolicyExecutionOutcome(
+                    "failed",
+                    (
+                        f"{result.message}\n\nWarning: Claude Code changed {len(changed_files)} files, "
+                        f"which exceeded the configured budget of {self.settings.max_files_modified_per_task}."
+                    ),
+                    decision,
+                    result,
                 )
 
-        return result.message if result.success else f"{result.message}"
+        disposition = "executed" if result.success else "failed"
+        return PolicyExecutionOutcome(disposition, result.message if result.success else f"{result.message}", decision, result)
 
     async def _refresh_health(self) -> None:
         llm_health = await self.llm.healthcheck()
@@ -720,6 +958,14 @@ class Orchestrator:
             "start_on_login_detail": "startup registration unavailable" if startup_state is None else startup_state.detail,
         }
         self.bus.publish("policy", payload)
+
+    def _publish_routines_state(self, *, active_routine: str = "", status: str = "") -> None:
+        if self.routine_service is None:
+            return
+        self.bus.publish(
+            "routines",
+            self.routine_service.snapshot(active_routine=active_routine, status=status),
+        )
 
     def _publish_approval_state(self) -> None:
         self.bus.publish("approvals", self.approvals.snapshot())

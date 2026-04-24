@@ -45,6 +45,7 @@ class ActionType(StrEnum):
 class ActionSource(StrEnum):
     TYPED = "typed"
     VOICE = "voice"
+    ROUTINE = "routine"
     MEMORY_TRIGGERED = "memory_triggered"
     CLAUDE = "claude"
     CODEX = "codex"

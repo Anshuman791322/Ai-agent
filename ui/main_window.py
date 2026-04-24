@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from functools import partial
-
 from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtGui import QCloseEvent, QFont
+from PySide6.QtGui import QCloseEvent, QFont, QFontInfo
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -14,11 +12,18 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QScrollArea,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
 from config.settings import AppSettings
+from ui.widgets.command_center import (
+    CommandCenterBackdrop,
+    MetricCard,
+    QuickActionsPanel,
+    TelemetryPanel,
+)
 from ui.widgets.command_input import CommandInputWidget
 from ui.widgets.console_log import ConsoleLogWidget
 from ui.widgets.scanline_overlay import ScanlineOverlay
@@ -44,53 +49,57 @@ class MainWindow(QMainWindow):
         self._allow_close = False
         self._status_detail_labels: dict[str, QLabel] = {}
         self._approvals_payload: dict = {"count": 0, "items": [], "first": {}}
+        self._latest_statuses: dict[str, dict] = {}
 
         self.setWindowTitle(self.settings.window_title)
         screen = QApplication.primaryScreen()
         if screen is not None:
             available = screen.availableGeometry()
-            width = max(1120, min(1380, available.width() - 48))
-            height = max(720, min(860, available.height() - 72))
+            width = min(1680, max(1180, available.width() - 40))
+            height = min(940, max(760, available.height() - 52))
+            width = min(width, max(1040, available.width() - 10))
+            height = min(height, max(700, available.height() - 10))
             self.resize(width, height)
         else:
-            self.resize(1360, 840)
-        self.setMinimumSize(1120, 720)
+            self.resize(1400, 860)
+        self.setMinimumSize(1120, 740)
 
-        font = QFont("Cascadia Mono")
-        if not font.exactMatch():
-            font = QFont("Consolas")
-        font.setStyleHint(QFont.StyleHint.Monospace)
-        self.setFont(font)
+        self.setFont(self._choose_ui_font())
 
-        central = QWidget(self)
+        central = CommandCenterBackdrop(self)
         central.setObjectName("mainWindowRoot")
         self.setCentralWidget(central)
 
         root_layout = QVBoxLayout(central)
         root_layout.setContentsMargins(18, 18, 18, 18)
-        root_layout.setSpacing(12)
+        root_layout.setSpacing(14)
 
-        header = self._build_header(central)
+        top_row = QHBoxLayout()
+        top_row.setSpacing(14)
+        top_row.addWidget(self._build_header(central), 7)
+        top_row.addWidget(self._build_metric_strip(central), 6)
+        root_layout.addLayout(top_row)
+
         self.status_badges = StatusBadgesWidget(central)
+        root_layout.addWidget(self.status_badges)
 
-        body_layout = QHBoxLayout()
-        body_layout.setSpacing(12)
-
-        left_column = QVBoxLayout()
-        left_column.setSpacing(12)
         self.console_log = ConsoleLogWidget(max_blocks=self.settings.max_console_blocks, parent=central)
-        left_column.addWidget(self.console_log, 1)
+        self.console_log.setMinimumWidth(360)
+
+        self.telemetry_panel = TelemetryPanel(central)
+        self.telemetry_panel.setMinimumWidth(360)
 
         right_container = QWidget(central)
         right_container.setObjectName("rightColumnContainer")
         right_column = QVBoxLayout(right_container)
-        right_column.setSpacing(12)
-        right_column.setContentsMargins(0, 0, 0, 0)
+        right_column.setSpacing(14)
+        right_column.setContentsMargins(0, 0, 12, 0)
         right_column.addWidget(self._build_context_panel(central))
         right_column.addWidget(self._build_status_panel(central))
         right_column.addWidget(self._build_internet_panel(central))
         right_column.addWidget(self._build_security_panel(central))
         right_column.addWidget(self._build_background_panel(central))
+        right_column.addWidget(self._build_routines_panel(central))
         right_column.addWidget(self._build_voice_panel(central))
         right_column.addWidget(self._build_quick_actions_panel(central))
         right_column.addStretch(1)
@@ -101,15 +110,23 @@ class MainWindow(QMainWindow):
         right_scroll.setFrameShape(QFrame.Shape.NoFrame)
         right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         right_scroll.setWidget(right_container)
+        right_scroll.setMinimumWidth(460)
 
-        body_layout.addLayout(left_column, 4)
-        body_layout.addWidget(right_scroll, 2)
+        self.content_splitter = QSplitter(Qt.Orientation.Horizontal, central)
+        self.content_splitter.setObjectName("contentSplitter")
+        self.content_splitter.setChildrenCollapsible(False)
+        self.content_splitter.setHandleWidth(12)
+        self.content_splitter.addWidget(self.console_log)
+        self.content_splitter.addWidget(self.telemetry_panel)
+        self.content_splitter.addWidget(right_scroll)
+        self.content_splitter.setStretchFactor(0, 10)
+        self.content_splitter.setStretchFactor(1, 10)
+        self.content_splitter.setStretchFactor(2, 10)
+        self.content_splitter.setSizes([470, 410, 610])
+
+        root_layout.addWidget(self.content_splitter, 1)
 
         self.command_input = CommandInputWidget(central)
-
-        root_layout.addWidget(header)
-        root_layout.addWidget(self.status_badges)
-        root_layout.addLayout(body_layout, 1)
         root_layout.addWidget(self.command_input)
 
         self.scanline_overlay = ScanlineOverlay(central)
@@ -118,70 +135,101 @@ class MainWindow(QMainWindow):
         self._wire_controls()
         self._apply_styles()
 
-    def _build_header(self, parent: QWidget) -> QFrame:
-        header = QFrame(parent)
-        header.setObjectName("headerFrame")
+    def _choose_ui_font(self) -> QFont:
+        for family in ("Cascadia Mono", "Consolas", "Lucida Console", "Courier New"):
+            font = QFont(family)
+            font.setStyleHint(QFont.StyleHint.Monospace)
+            if QFontInfo(font).family().lower() == family.lower():
+                return font
+        fallback = QFont()
+        fallback.setStyleHint(QFont.StyleHint.Monospace)
+        return fallback
 
-        layout = QVBoxLayout(header)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+    def _configure_panel_layout(self, layout: QVBoxLayout, *, spacing: int = 10) -> None:
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(spacing)
 
-        top_row = QHBoxLayout()
-        top_row.setSpacing(12)
-
-        title_block = QVBoxLayout()
-        title_block.setSpacing(4)
-
-        title = QLabel("JARVIS // WINDOWS COMMAND CENTER", header)
-        title.setObjectName("titleLabel")
-        subtitle = QLabel(
-            f"LOCAL-FIRST // POLICY-BOUND // {self.settings.ollama_model.upper()} // {self.settings.whisper_model_size.upper()}",
-            header,
+    def _panel_text(self, text: str) -> str:
+        cleaned = str(text).strip()
+        return (
+            cleaned.replace(" | ", " |\n")
+            .replace(" // ", " //\n")
+            .replace("\\", "\\\u200b")
+            .replace("/", "/\u200b")
         )
-        subtitle.setObjectName("subtitleLabel")
-        self.runtime_label = QLabel("Balanced autonomy online. Local systems are initializing.", header)
+
+    def _build_header(self, parent: QWidget) -> QFrame:
+        frame = QFrame(parent)
+        frame.setObjectName("heroFrame")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(10)
+
+        self.title_label = QLabel("JARVIS // WINDOWS COMMAND CENTER", frame)
+        self.title_label.setObjectName("heroTitleLabel")
+        self.subtitle_label = QLabel(
+            f"LOCAL-FIRST // ALWAYS-LISTENING // {self.settings.ollama_model.upper()} // {self.settings.whisper_model_size.upper()}",
+            frame,
+        )
+        self.subtitle_label.setObjectName("heroSubtitleLabel")
+        self.runtime_label = QLabel("Local systems are initializing.", frame)
         self.runtime_label.setObjectName("runtimeLabel")
 
-        title_block.addWidget(title)
-        title_block.addWidget(subtitle)
-        title_block.addWidget(self.runtime_label)
-
-        mode_block = QVBoxLayout()
-        mode_block.setSpacing(4)
-        mode_label = QLabel("Autonomy mode", header)
-        mode_label.setObjectName("panelAccent")
-        self.mode_selector = QComboBox(header)
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(12)
+        mode_label = QLabel("Autonomy mode", frame)
+        mode_label.setObjectName("inlineLabel")
+        self.mode_selector = QComboBox(frame)
         self.mode_selector.setObjectName("modeSelector")
         self.mode_selector.addItem("Hands free", "hands_free")
         self.mode_selector.addItem("Balanced", "balanced")
         self.mode_selector.addItem("Strict", "strict")
         self.mode_selector.setCurrentIndex(1)
-        self.mode_summary_label = QLabel("Allowed workspace actions stay autonomous.", header)
-        self.mode_summary_label.setObjectName("panelBodyMuted")
+        self.mode_summary_label = QLabel("Workspace-safe medium risk stays autonomous.", frame)
+        self.mode_summary_label.setObjectName("inlineHintLabel")
         self.mode_summary_label.setWordWrap(True)
-        mode_block.addWidget(mode_label)
-        mode_block.addWidget(self.mode_selector)
-        mode_block.addWidget(self.mode_summary_label)
+        mode_row.addWidget(mode_label)
+        mode_row.addWidget(self.mode_selector, 0)
+        mode_row.addStretch(1)
 
-        top_row.addLayout(title_block, 4)
-        top_row.addLayout(mode_block, 2)
-        layout.addLayout(top_row)
-        return header
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.subtitle_label)
+        layout.addWidget(self.runtime_label)
+        layout.addLayout(mode_row)
+        layout.addWidget(self.mode_summary_label)
+        return frame
+
+    def _build_metric_strip(self, parent: QWidget) -> QFrame:
+        frame = QFrame(parent)
+        frame.setObjectName("metricStripFrame")
+        grid = QGridLayout(frame)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+        self.metric_cards = {
+            "llm": MetricCard("LLM", frame),
+            "voice": MetricCard("Voice", frame),
+            "memory": MetricCard("Memory", frame),
+            "actions": MetricCard("Actions", frame),
+        }
+        for index, key in enumerate(("llm", "voice", "memory", "actions")):
+            grid.addWidget(self.metric_cards[key], index // 2, index % 2)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        return frame
 
     def _build_context_panel(self, parent: QWidget) -> QFrame:
         frame = QFrame(parent)
-        frame.setObjectName("infoPanel")
-
+        frame.setObjectName("panelFrame")
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        self._configure_panel_layout(layout)
 
-        title = QLabel("Context and trust", frame)
-        title.setObjectName("panelTitle")
+        title = QLabel("Desktop context", frame)
+        title.setObjectName("panelTitleLabel")
         subtitle = QLabel("Scoped visibility", frame)
-        subtitle.setObjectName("panelAccent")
+        subtitle.setObjectName("panelSubTitleLabel")
         self.context_summary_label = QLabel("Waiting for active window data.", frame)
-        self.context_summary_label.setObjectName("panelBody")
+        self.context_summary_label.setObjectName("panelBodyLabel")
         self.context_summary_label.setWordWrap(True)
         self.trust_zone_label = QLabel("Trust zone: allowed_workspace", frame)
         self.trust_zone_label.setObjectName("panelBodyMuted")
@@ -203,47 +251,44 @@ class MainWindow(QMainWindow):
 
     def _build_status_panel(self, parent: QWidget) -> QFrame:
         frame = QFrame(parent)
-        frame.setObjectName("infoPanel")
-
+        frame.setObjectName("panelFrame")
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
+        self._configure_panel_layout(layout)
 
-        title = QLabel("Subsystems", frame)
-        title.setObjectName("panelTitle")
+        title = QLabel("Subsystem digest", frame)
+        title.setObjectName("panelTitleLabel")
+        subtitle = QLabel("Live details from the current runtime", frame)
+        subtitle.setObjectName("panelSubTitleLabel")
         layout.addWidget(title)
+        layout.addWidget(subtitle)
 
         grid = QGridLayout()
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(8)
-
-        for row, key in enumerate(("llm", "voice", "memory", "actions", "internet")):
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(10)
+        for row, key in enumerate(("llm", "voice", "memory", "actions", "internet", "routines")):
             name_label = QLabel(key.upper(), frame)
-            name_label.setObjectName("infoKey")
+            name_label.setObjectName("infoKeyLabel")
             detail_label = QLabel("waiting for health check", frame)
-            detail_label.setObjectName("infoValue")
+            detail_label.setObjectName("infoValueLabel")
             detail_label.setWordWrap(True)
             self._status_detail_labels[key] = detail_label
             grid.addWidget(name_label, row, 0)
             grid.addWidget(detail_label, row, 1)
-
         layout.addLayout(grid)
         return frame
 
     def _build_internet_panel(self, parent: QWidget) -> QFrame:
         frame = QFrame(parent)
-        frame.setObjectName("infoPanel")
-
+        frame.setObjectName("panelFrame")
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        self._configure_panel_layout(layout)
 
         title = QLabel("Internet tools", frame)
-        title.setObjectName("panelTitle")
+        title.setObjectName("panelTitleLabel")
         subtitle = QLabel("Constrained search and summaries", frame)
-        subtitle.setObjectName("panelAccent")
+        subtitle.setObjectName("panelSubTitleLabel")
         self.internet_detail_label = QLabel("Search, fetch, and summarize stay capped until you use them.", frame)
-        self.internet_detail_label.setObjectName("panelBody")
+        self.internet_detail_label.setObjectName("panelBodyLabel")
         self.internet_detail_label.setWordWrap(True)
         self.internet_examples_label = QLabel(
             "Commands: /search <query>, /open-result <n>, /fetch <url-or-n>, /summarize <url-or-n>",
@@ -260,22 +305,20 @@ class MainWindow(QMainWindow):
 
     def _build_security_panel(self, parent: QWidget) -> QFrame:
         frame = QFrame(parent)
-        frame.setObjectName("infoPanel")
-
+        frame.setObjectName("panelFrame")
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        self._configure_panel_layout(layout, spacing=12)
 
         title = QLabel("Policy controls", frame)
-        title.setObjectName("panelTitle")
+        title.setObjectName("panelTitleLabel")
+        subtitle = QLabel("Bounded autonomy and approvals", frame)
+        subtitle.setObjectName("panelSubTitleLabel")
         self.approval_summary_label = QLabel("Pending approvals: 0", frame)
-        self.approval_summary_label.setObjectName("panelBody")
+        self.approval_summary_label.setObjectName("panelBodyLabel")
         self.approval_summary_label.setWordWrap(True)
         self.active_task_label = QLabel("Active task: idle", frame)
         self.active_task_label.setObjectName("panelBodyMuted")
 
-        button_row = QHBoxLayout()
-        button_row.setSpacing(8)
         self.pause_button = QPushButton("PAUSE", frame)
         self.pause_button.setObjectName("quickActionButton")
         self.deny_high_button = QPushButton("DENY HIGH", frame)
@@ -284,44 +327,47 @@ class MainWindow(QMainWindow):
         self.clear_approvals_button.setObjectName("quickActionButton")
         self.voice_toggle_button = QPushButton("VOICE", frame)
         self.voice_toggle_button.setObjectName("quickActionButton")
-        button_row.addWidget(self.pause_button)
-        button_row.addWidget(self.deny_high_button)
-        button_row.addWidget(self.clear_approvals_button)
-        button_row.addWidget(self.voice_toggle_button)
-
-        approval_row = QHBoxLayout()
-        approval_row.setSpacing(8)
         self.approve_button = QPushButton("APPROVE NEXT", frame)
         self.approve_button.setObjectName("quickActionButton")
         self.approve_button.setEnabled(False)
         self.deny_button = QPushButton("DENY NEXT", frame)
         self.deny_button.setObjectName("quickActionButton")
         self.deny_button.setEnabled(False)
-        approval_row.addWidget(self.approve_button)
-        approval_row.addWidget(self.deny_button)
+
+        controls_grid = QGridLayout()
+        controls_grid.setHorizontalSpacing(8)
+        controls_grid.setVerticalSpacing(8)
+        controls_grid.setColumnStretch(0, 1)
+        controls_grid.setColumnStretch(1, 1)
+        controls_grid.addWidget(self.pause_button, 0, 0)
+        controls_grid.addWidget(self.deny_high_button, 0, 1)
+        controls_grid.addWidget(self.clear_approvals_button, 1, 0)
+        controls_grid.addWidget(self.voice_toggle_button, 1, 1)
+        controls_grid.addWidget(self.approve_button, 2, 0)
+        controls_grid.addWidget(self.deny_button, 2, 1)
 
         layout.addWidget(title)
+        layout.addWidget(subtitle)
         layout.addWidget(self.approval_summary_label)
         layout.addWidget(self.active_task_label)
-        layout.addLayout(button_row)
-        layout.addLayout(approval_row)
+        layout.addLayout(controls_grid)
         return frame
 
     def _build_background_panel(self, parent: QWidget) -> QFrame:
         frame = QFrame(parent)
-        frame.setObjectName("infoPanel")
-
+        frame.setObjectName("panelFrame")
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        self._configure_panel_layout(layout)
 
         title = QLabel("Background assistant", frame)
-        title.setObjectName("panelTitle")
+        title.setObjectName("panelTitleLabel")
+        subtitle = QLabel("Tray and login behavior", frame)
+        subtitle.setObjectName("panelSubTitleLabel")
         self.background_detail_label = QLabel(
             "Closing the window keeps JARVIS alive in the tray when the tray is available.",
             frame,
         )
-        self.background_detail_label.setObjectName("panelBody")
+        self.background_detail_label.setObjectName("panelBodyLabel")
         self.background_detail_label.setWordWrap(True)
         self.background_startup_label = QLabel("Startup on login: off", frame)
         self.background_startup_label.setObjectName("panelBodyMuted")
@@ -335,29 +381,55 @@ class MainWindow(QMainWindow):
         self.startup_toggle_button.setObjectName("quickActionButton")
 
         layout.addWidget(title)
+        layout.addWidget(subtitle)
         layout.addWidget(self.background_detail_label)
         layout.addWidget(self.background_startup_label)
         layout.addWidget(self.background_toast_label)
-        layout.addWidget(self.startup_toggle_button)
+        layout.addWidget(self.startup_toggle_button, 0, Qt.AlignmentFlag.AlignLeft)
+        return frame
+
+    def _build_routines_panel(self, parent: QWidget) -> QFrame:
+        frame = QFrame(parent)
+        frame.setObjectName("panelFrame")
+        layout = QVBoxLayout(frame)
+        self._configure_panel_layout(layout)
+
+        title = QLabel("Routines", frame)
+        title.setObjectName("panelTitleLabel")
+        subtitle = QLabel("Local preset flows through the policy gate", frame)
+        subtitle.setObjectName("panelSubTitleLabel")
+        self.routines_summary_label = QLabel("Loading local routine catalog.", frame)
+        self.routines_summary_label.setObjectName("panelBodyLabel")
+        self.routines_summary_label.setWordWrap(True)
+        self.routines_status_label = QLabel("No routine has run yet.", frame)
+        self.routines_status_label.setObjectName("panelBodyMuted")
+        self.routines_status_label.setWordWrap(True)
+        self.routines_recent_label = QLabel("Starter routines will appear here.", frame)
+        self.routines_recent_label.setObjectName("panelBodyMuted")
+        self.routines_recent_label.setWordWrap(True)
+
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+        layout.addWidget(self.routines_summary_label)
+        layout.addWidget(self.routines_status_label)
+        layout.addWidget(self.routines_recent_label)
         return frame
 
     def _build_voice_panel(self, parent: QWidget) -> QFrame:
         frame = QFrame(parent)
-        frame.setObjectName("infoPanel")
-
+        frame.setObjectName("panelFrame")
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        self._configure_panel_layout(layout)
 
         title = QLabel("Voice monitor", frame)
-        title.setObjectName("panelTitle")
+        title.setObjectName("panelTitleLabel")
         subtitle = QLabel("Wake phrase: Jarvis", frame)
-        subtitle.setObjectName("panelAccent")
+        subtitle.setObjectName("panelSubTitleLabel")
         self.voice_monitor_label = QLabel(
             "Always-listening mode is enabled. Say 'Jarvis', pause if you want, then speak your command. The PTT button is only a fallback.",
             frame,
         )
-        self.voice_monitor_label.setObjectName("panelBody")
+        self.voice_monitor_label.setObjectName("panelBodyLabel")
         self.voice_monitor_label.setWordWrap(True)
 
         layout.addWidget(title)
@@ -366,38 +438,21 @@ class MainWindow(QMainWindow):
         return frame
 
     def _build_quick_actions_panel(self, parent: QWidget) -> QFrame:
-        frame = QFrame(parent)
-        frame.setObjectName("infoPanel")
-
-        layout = QVBoxLayout(frame)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
-
-        title = QLabel("Quick actions", frame)
-        title.setObjectName("panelTitle")
-        layout.addWidget(title)
-
         commands = (
-            ("OPEN CLAUDE CODE", "open claude code"),
-            ("OPEN EXPLORER", "open file explorer"),
-            ("OPEN CHROME", "open google chrome"),
+            ("WORK MODE", "/run-routine Work Mode"),
+            ("STREAM MODE", "/run-routine Stream Mode"),
+            ("GAMING MODE", "/run-routine Gaming Mode"),
+            ("CLAUDE CODE", "open claude code"),
+            ("FILE EXPLORER", "open file explorer"),
             ("HEALTH CHECK", "/health"),
-            ("SEARCH WEB", "/search qt system tray icon"),
-            ("SUMMARIZE RESULT", "/summarize 1"),
+            ("ROUTINES", "/routines"),
+            ("WEB SEARCH", "/search qt system tray icon"),
             ("LIST FILES", "/list"),
-            ("RUN TESTS", "/run pytest"),
+            ("RUN PYTEST", "/run pytest"),
         )
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(10)
-        for index, (label, command) in enumerate(commands):
-            button = QPushButton(label, frame)
-            button.setObjectName("quickActionButton")
-            button.clicked.connect(partial(self.quick_command_requested.emit, command))
-            grid.addWidget(button, index // 2, index % 2)
-
-        layout.addLayout(grid)
-        return frame
+        panel = QuickActionsPanel(commands, parent)
+        panel.command_requested.connect(self.quick_command_requested.emit)
+        return panel
 
     def _wire_controls(self) -> None:
         self.command_input.pause_requested.connect(self.pause_requested.emit)
@@ -421,13 +476,23 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(
             """
             QMainWindow, QWidget#mainWindowRoot {
-                background-color: #050505;
-                color: #ffc14d;
+                background-color: transparent;
+                color: #dcfff4;
             }
-            QFrame#headerFrame, QFrame#consoleFrame, QFrame#infoPanel, QFrame#commandInputFrame {
-                border: 1px solid rgba(255, 176, 0, 0.18);
-                border-radius: 10px;
-                background-color: rgba(7, 7, 7, 0.92);
+            QFrame#heroFrame, QFrame#panelFrame, QFrame#consoleFrame, QFrame#metricCard {
+                border: 1px solid rgba(144, 255, 205, 0.20);
+                border-radius: 18px;
+                background-color: rgba(8, 18, 22, 0.84);
+            }
+            QFrame#metricStripFrame {
+                background: transparent;
+                border: none;
+            }
+            QSplitter#contentSplitter::handle {
+                background: transparent;
+            }
+            QSplitter#contentSplitter::handle:horizontal {
+                width: 12px;
             }
             QScrollArea#rightScrollArea {
                 background: transparent;
@@ -436,102 +501,176 @@ class MainWindow(QMainWindow):
             QWidget#qt_scrollarea_viewport, QWidget#rightColumnContainer {
                 background: transparent;
             }
-            QLabel#titleLabel {
-                color: #ffb000;
+            QScrollBar:vertical {
+                background: rgba(7, 15, 18, 0.42);
+                width: 10px;
+                margin: 6px 0 6px 0;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(120, 255, 190, 0.34);
+                border-radius: 5px;
+                min-height: 38px;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+            QLabel#heroTitleLabel {
+                color: #c9fff4;
                 font-size: 26px;
                 font-weight: 700;
                 letter-spacing: 2px;
             }
-            QLabel#subtitleLabel {
-                color: rgba(255, 193, 77, 0.68);
-                font-size: 11px;
+            QLabel#heroSubtitleLabel {
+                color: rgba(178, 240, 223, 0.72);
+                font-size: 10px;
                 letter-spacing: 2px;
             }
             QLabel#runtimeLabel {
-                color: #9ef0b3;
-                font-size: 12px;
+                color: #9ef5b8;
+                font-size: 13px;
             }
-            QLabel#panelTitle {
-                color: #ffb000;
-                font-size: 15px;
-                font-weight: 700;
-                letter-spacing: 1px;
-            }
-            QLabel#panelAccent {
-                color: #8cffb1;
-                font-size: 12px;
-            }
-            QLabel#panelBody, QLabel#infoValue {
-                color: #f3d99a;
-                font-size: 12px;
-                line-height: 1.3em;
-            }
-            QLabel#panelBodyMuted {
-                color: rgba(255, 210, 145, 0.62);
-                font-size: 11px;
-                line-height: 1.25em;
-            }
-            QLabel#infoKey {
-                color: rgba(255, 193, 77, 0.75);
+            QLabel#inlineLabel {
+                color: #d7fff3;
                 font-size: 11px;
                 letter-spacing: 1px;
+            }
+            QLabel#inlineHintLabel {
+                color: rgba(219, 255, 244, 0.76);
+                font-size: 11px;
             }
             QComboBox#modeSelector {
-                background-color: rgba(0, 0, 0, 0.88);
-                border: 1px solid rgba(255, 176, 0, 0.25);
-                color: #ffe1a3;
-                padding: 8px;
-                border-radius: 6px;
-                min-width: 180px;
+                background-color: rgba(7, 15, 18, 0.92);
+                border: 1px solid rgba(144, 255, 205, 0.24);
+                color: #f2fff9;
+                padding: 8px 12px;
+                border-radius: 10px;
+                min-width: 210px;
+            }
+            QLabel#metricCardTitle {
+                color: rgba(212, 255, 245, 0.72);
+                font-size: 11px;
+                letter-spacing: 1px;
+            }
+            QLabel#metricCardValue {
+                color: #8cf7b0;
+                font-size: 20px;
+                font-weight: 700;
+            }
+            QLabel#metricCardDetail {
+                color: rgba(211, 246, 234, 0.72);
+                font-size: 10px;
+            }
+            QFrame#metricCard[state="warn"] QLabel#metricCardValue {
+                color: #ffe382;
+            }
+            QFrame#metricCard[state="error"] QLabel#metricCardValue {
+                color: #ff98a6;
+            }
+            QFrame#metricCard[state="busy"] QLabel#metricCardValue {
+                color: #90f1ff;
+            }
+            QLabel#panelTitleLabel {
+                color: #f2fff9;
+                font-size: 14px;
+                font-weight: 600;
+            }
+            QLabel#panelSubTitleLabel {
+                color: rgba(138, 255, 210, 0.72);
+                font-size: 11px;
+            }
+            QLabel#panelBodyLabel, QLabel#infoValueLabel {
+                color: rgba(226, 245, 237, 0.88);
+                font-size: 11px;
+                line-height: 1.35em;
+            }
+            QLabel#panelBodyMuted {
+                color: rgba(210, 238, 228, 0.68);
+                font-size: 11px;
+                line-height: 1.3em;
+            }
+            QLabel#infoKeyLabel {
+                color: rgba(138, 255, 210, 0.78);
+                font-size: 11px;
+                letter-spacing: 1px;
             }
             QPlainTextEdit#consoleView {
-                background-color: rgba(0, 0, 0, 0.82);
-                color: #ffcc70;
+                background-color: rgba(5, 10, 14, 0.92);
+                color: #f0c97b;
                 border: none;
-                padding: 12px;
-                selection-background-color: rgba(255, 176, 0, 0.28);
+                padding: 14px;
+                selection-background-color: rgba(120, 255, 198, 0.18);
                 font-size: 13px;
+            }
+            QFrame#commandInputFrame {
+                border: 1px solid rgba(144, 255, 205, 0.20);
+                border-radius: 18px;
+                background-color: rgba(10, 18, 21, 0.88);
+                padding: 8px;
             }
             QLineEdit#commandLineEdit {
-                background-color: rgba(0, 0, 0, 0.88);
-                border: 1px solid rgba(255, 176, 0, 0.25);
-                color: #ffe1a3;
-                padding: 12px;
-                border-radius: 6px;
+                background-color: rgba(8, 15, 18, 0.92);
+                border: 1px solid rgba(144, 255, 205, 0.24);
+                color: #e8fff8;
+                padding: 0 16px;
+                border-radius: 10px;
                 font-size: 13px;
+                min-height: 42px;
             }
-            QPushButton#commandSendButton, QPushButton#commandVoiceButton, QPushButton#commandAuxButton, QPushButton#quickActionButton {
-                background-color: rgba(255, 176, 0, 0.08);
-                border: 1px solid rgba(255, 176, 0, 0.32);
-                color: #ffb000;
-                padding: 8px 12px;
-                border-radius: 6px;
-                min-height: 36px;
+            QPushButton#commandSendButton, QPushButton#commandVoiceButton, QPushButton#commandAuxButton {
+                background-color: rgba(120, 255, 190, 0.08);
+                border: 1px solid rgba(135, 255, 196, 0.26);
+                color: #dcfff4;
+                padding: 0 14px;
+                border-radius: 12px;
+                min-height: 42px;
             }
-            QPushButton#commandSendButton:hover, QPushButton#commandVoiceButton:hover, QPushButton#commandAuxButton:hover, QPushButton#quickActionButton:hover {
-                background-color: rgba(255, 176, 0, 0.16);
+            QPushButton#commandAuxButton {
+                min-width: 86px;
+            }
+            QPushButton#commandVoiceButton {
+                min-width: 64px;
+            }
+            QPushButton#commandSendButton {
+                min-width: 92px;
+            }
+            QPushButton#commandSendButton {
+                background-color: rgba(120, 255, 190, 0.18);
+                color: #ffffff;
             }
             QPushButton#quickActionButton {
-                text-align: left;
+                background-color: rgba(120, 255, 190, 0.08);
+                border: 1px solid rgba(135, 255, 196, 0.26);
+                color: #dcfff4;
+                padding: 8px 10px;
+                border-radius: 12px;
+                min-height: 38px;
+                min-width: 0;
                 font-weight: 600;
-                letter-spacing: 1px;
-                min-width: 0px;
+                letter-spacing: 0.8px;
+            }
+            QPushButton#commandSendButton:hover, QPushButton#commandVoiceButton:hover, QPushButton#commandAuxButton:hover, QPushButton#quickActionButton:hover {
+                background-color: rgba(120, 255, 190, 0.18);
+                border: 1px solid rgba(135, 255, 196, 0.42);
             }
             QPushButton:disabled {
-                color: rgba(255, 176, 0, 0.35);
-                border-color: rgba(255, 176, 0, 0.12);
+                color: rgba(220, 255, 244, 0.34);
+                border-color: rgba(135, 255, 196, 0.12);
             }
             QFrame#statusBadgesFrame {
                 background: transparent;
             }
             QLabel#statusBadge {
                 border-radius: 11px;
-                padding: 6px 10px;
+                padding: 7px 12px;
                 font-size: 11px;
                 letter-spacing: 1px;
-                border: 1px solid rgba(255, 176, 0, 0.22);
-                background-color: rgba(255, 176, 0, 0.05);
-                color: #ffcc70;
+                border: 1px solid rgba(140, 255, 190, 0.22);
+                background-color: rgba(120, 255, 190, 0.06);
+                color: #d6ffef;
             }
             QLabel#statusBadge[state="ok"] {
                 border: 1px solid rgba(89, 255, 149, 0.3);
@@ -539,18 +678,18 @@ class MainWindow(QMainWindow):
                 color: #8cffb1;
             }
             QLabel#statusBadge[state="warn"] {
-                border: 1px solid rgba(255, 184, 77, 0.35);
-                background-color: rgba(255, 184, 77, 0.12);
-                color: #ffd08c;
+                border: 1px solid rgba(255, 219, 109, 0.34);
+                background-color: rgba(255, 219, 109, 0.12);
+                color: #ffe68e;
             }
             QLabel#statusBadge[state="error"] {
-                border: 1px solid rgba(255, 92, 92, 0.35);
-                background-color: rgba(255, 92, 92, 0.1);
-                color: #ff8d8d;
+                border: 1px solid rgba(255, 110, 130, 0.34);
+                background-color: rgba(255, 110, 130, 0.10);
+                color: #ff98a6;
             }
             QLabel#statusBadge[state="busy"] {
                 border: 1px solid rgba(77, 214, 255, 0.35);
-                background-color: rgba(77, 214, 255, 0.1);
+                background-color: rgba(77, 214, 255, 0.10);
                 color: #88e7ff;
             }
             """
@@ -563,15 +702,19 @@ class MainWindow(QMainWindow):
         self.console_log.append_entry(payload)
 
     def update_statuses(self, payload: dict) -> None:
+        self._latest_statuses = payload
         self.status_badges.update_badges(payload)
+        self.telemetry_panel.update_statuses(payload)
 
         voice_detail = ""
         llm_detail = ""
         internet_detail = ""
         internet_state = ""
+        routine_detail = ""
+        routine_state = ""
         for key, label in self._status_detail_labels.items():
             detail = payload.get(key, {}).get("detail", "waiting for health check")
-            label.setText(detail)
+            label.setText(self._panel_text(detail))
             if key == "voice":
                 voice_detail = detail
             elif key == "llm":
@@ -579,26 +722,42 @@ class MainWindow(QMainWindow):
             elif key == "internet":
                 internet_detail = detail
                 internet_state = str(payload.get(key, {}).get("state", "unknown"))
+            elif key == "routines":
+                routine_detail = detail
+                routine_state = str(payload.get(key, {}).get("state", "unknown"))
+
+        for key, card in self.metric_cards.items():
+            item = payload.get(key, {})
+            state = str(item.get("state", "unknown"))
+            detail = str(item.get("detail", "awaiting data"))
+            value = {
+                "ok": "OK",
+                "warn": "WARN",
+                "error": "FAIL",
+                "busy": "LIVE",
+            }.get(state, "--")
+            card.set_metric(key.upper(), value, detail, state)
 
         if voice_detail:
             self.voice_monitor_label.setText(voice_detail)
         if internet_detail:
             self.internet_detail_label.setText(internet_detail)
-        if llm_detail or voice_detail or (internet_state in {"warn", "error"} and internet_detail):
-            summary = " | ".join(
-                part
-                for part in (
-                    voice_detail,
-                    llm_detail,
-                    internet_detail if internet_state in {"warn", "error"} else "",
-                )
-                if part
+        summary = " | ".join(
+            part
+            for part in (
+                voice_detail,
+                llm_detail,
+                internet_detail if internet_state in {"warn", "error"} else "",
+                routine_detail if routine_state in {"busy", "warn", "error"} else "",
             )
+            if part
+        )
+        if summary:
             self.runtime_label.setText(summary)
 
     def update_context(self, payload: dict) -> None:
         summary = payload.get("summary", "").strip() or "Waiting for active window data."
-        self.context_summary_label.setText(summary)
+        self.context_summary_label.setText(self._panel_text(summary))
 
     def update_policy_state(self, payload: dict) -> None:
         mode = str(payload.get("mode", "balanced"))
@@ -623,17 +782,19 @@ class MainWindow(QMainWindow):
         startup_detail = str(payload.get("start_on_login_detail", "startup on login is off"))
 
         self.mode_summary_label.setText(
-            "Autonomy paused." if paused else (
-                "Workspace-safe medium risk runs automatically." if mode == "balanced" else
-                "Low and medium risk run automatically." if mode == "hands_free" else
-                "Only low risk runs automatically."
-            )
+            "Autonomy paused."
+            if paused
+            else "Workspace-safe medium risk stays autonomous."
+            if mode == "balanced"
+            else "Low and medium risk stay autonomous."
+            if mode == "hands_free"
+            else "Only low risk stays autonomous."
         )
-        self.trust_zone_label.setText(f"Trust zone: {trust_zone} | workspace: {workspace}")
-        self.context_usage_label.setText(f"Context in use: {context_usage}")
-        self.memory_usage_label.setText(f"Memory usage: {memory_used} items, {blocked} blocked")
-        self.handoff_label.setText(f"Claude handoff: {handoff_state} | workspace: {workspace}")
-        self.active_task_label.setText(f"Active task: {active_task}")
+        self.trust_zone_label.setText(self._panel_text(f"Trust zone: {trust_zone} | workspace: {workspace}"))
+        self.context_usage_label.setText(self._panel_text(f"Context in use: {context_usage}"))
+        self.memory_usage_label.setText(self._panel_text(f"Memory usage: {memory_used} items, {blocked} blocked"))
+        self.handoff_label.setText(self._panel_text(f"Claude handoff: {handoff_state} | workspace: {workspace}"))
+        self.active_task_label.setText(self._panel_text(f"Active task: {active_task}"))
         self.pause_button.setText("RESUME" if paused else "PAUSE")
         self.deny_high_button.setText("ALLOW HIGH" if deny_high else "DENY HIGH")
         self.background_detail_label.setText(
@@ -641,9 +802,10 @@ class MainWindow(QMainWindow):
             if tray_available
             else "System tray is unavailable. Closing the window exits the app instead of keeping it in the background."
         )
-        self.background_startup_label.setText(f"Startup on login: {'on' if start_on_login else 'off'} | {startup_detail}")
+        self.background_startup_label.setText(
+            self._panel_text(f"Startup on login: {'on' if start_on_login else 'off'} | {startup_detail}")
+        )
         self.startup_toggle_button.setText("DISABLE STARTUP" if start_on_login else "ENABLE STARTUP")
-        self.startup_toggle_button.setEnabled(True)
         self.status_badges.update_policy_badges(payload, self._approvals_payload)
 
     def update_approval_state(self, payload: dict) -> None:
@@ -669,6 +831,37 @@ class MainWindow(QMainWindow):
             },
             payload,
         )
+
+    def update_routines(self, payload: dict) -> None:
+        available = payload.get("available", []) or []
+        recent_runs = payload.get("recent_runs", []) or []
+        active_routine = str(payload.get("active_routine", "")).strip()
+        status_text = str(payload.get("status", "")).strip()
+
+        if available:
+            names = ", ".join(item.get("name", "routine") for item in available)
+            self.routines_summary_label.setText(
+                self._panel_text(f"Loaded {len(available)} routines | {names}")
+            )
+        else:
+            self.routines_summary_label.setText("No local routines are stored.")
+
+        if active_routine:
+            self.routines_status_label.setText(self._panel_text(f"Active routine: {active_routine}"))
+        elif status_text:
+            self.routines_status_label.setText(self._panel_text(status_text))
+        else:
+            self.routines_status_label.setText("No routine has run yet.")
+
+        if recent_runs:
+            lines = []
+            for item in recent_runs[:4]:
+                lines.append(
+                    f"{item.get('name', 'routine')} [{str(item.get('status', 'unknown')).upper()}] {item.get('finished_at', '')}"
+                )
+            self.routines_recent_label.setText("\n".join(lines))
+        else:
+            self.routines_recent_label.setText("Recent runs will appear here once a routine executes.")
 
     def prepare_to_quit(self) -> None:
         self._allow_close = True

@@ -26,11 +26,11 @@ class ScanlineOverlay(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
         for y in range(0, self.height(), 4):
-            alpha = 12 if (y // 4) % 2 == 0 else 7
-            painter.fillRect(0, y, self.width(), 1, QColor(255, 176, 0, alpha))
+            alpha = 10 if (y // 4) % 2 == 0 else 6
+            painter.fillRect(0, y, self.width(), 1, QColor(132, 255, 205, alpha))
 
         sweep = QLinearGradient(0, self._phase - 120, 0, self._phase)
-        sweep.setColorAt(0.0, QColor(255, 176, 0, 0))
-        sweep.setColorAt(0.5, QColor(255, 176, 0, 18))
-        sweep.setColorAt(1.0, QColor(255, 176, 0, 0))
+        sweep.setColorAt(0.0, QColor(132, 255, 205, 0))
+        sweep.setColorAt(0.5, QColor(132, 255, 205, 14))
+        sweep.setColorAt(1.0, QColor(132, 255, 205, 0))
         painter.fillRect(self.rect(), sweep)

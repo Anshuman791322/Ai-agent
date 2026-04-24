@@ -224,6 +224,10 @@ class AppSettings:
         return self.app_dir / "jarvis.log"
 
     @property
+    def routines_file(self) -> Path:
+        return self.app_dir / "routines.json"
+
+    @property
     def system_prompt(self) -> str:
         return (
             "You are JARVIS, a Windows-first local desktop assistant. "

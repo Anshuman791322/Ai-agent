@@ -46,6 +46,7 @@ class AppState:
             "memory": SubsystemStatus(name="memory", detail="waiting for health check"),
             "actions": SubsystemStatus(name="actions", detail="waiting for health check"),
             "internet": SubsystemStatus(name="internet", detail="waiting for health check"),
+            "routines": SubsystemStatus(name="routines", detail="waiting for routine store"),
         }
 
     def add_log(self, role: str, text: str) -> LogEntry:
