@@ -6,7 +6,8 @@ from pathlib import Path
 from actions.system_actions import ActionResult, SystemActions
 from config.settings import AppSettings
 from security.handoff import HandoffManager
-from security.models import ActionRequest, ActionSource, ActionType, ContextSelection, DataSensitivity
+from security.models import ActionBudget, ActionRequest, ActionSource, ActionType, ContextSelection, DataSensitivity
+from security.redaction import looks_sensitive
 from security.workspace import WorkspaceJail
 
 
@@ -52,6 +53,19 @@ class ActionRegistry:
             read_access=True,
         )
 
+    def search_files_request(self, query: str, root_path: Path, source: ActionSource) -> ActionRequest:
+        cleaned_query = " ".join(query.strip().split())
+        return ActionRequest(
+            action_type=ActionType.SEARCH_FILES,
+            source=source,
+            description=f"Search files for {cleaned_query!r} under {root_path}.",
+            target=cleaned_query,
+            target_path=root_path,
+            read_access=True,
+            budget=ActionBudget(files_read=1, runtime_seconds=10),
+            metadata={"query": cleaned_query},
+        )
+
     def list_files_request(self, target_path: Path, source: ActionSource) -> ActionRequest:
         return ActionRequest(
             action_type=ActionType.LIST_FILES,
@@ -71,6 +85,35 @@ class ActionRegistry:
             target_path=target_path,
             read_access=True,
             budget=self.actions.preview_budget(),
+        )
+
+    def write_text_file_request(
+        self,
+        target_path: Path,
+        content: str,
+        source: ActionSource,
+        *,
+        overwrite: bool = False,
+        reason: str = "",
+    ) -> ActionRequest:
+        resolved = self.jail.resolve_path(target_path, base=self.jail.default_workspace())
+        verification = self._verify_text_write(resolved, content, overwrite=overwrite)
+        return ActionRequest(
+            action_type=ActionType.WRITE_TEXT_FILE,
+            source=source,
+            description=f"Write text file {resolved}.",
+            target=str(resolved),
+            target_path=resolved,
+            write_access=True,
+            destructive=resolved.exists() and overwrite,
+            budget=ActionBudget(files_modified=1, runtime_seconds=5),
+            metadata={
+                "content": content,
+                "overwrite": overwrite,
+                "reason": reason,
+                "safety_verified": verification["safe"],
+                "safety_reasons": verification["reasons"],
+            },
         )
 
     def workspace_command_request(self, command_id: str, source: ActionSource) -> ActionRequest:
@@ -131,10 +174,21 @@ class ActionRegistry:
             return await self.actions.open_explorer(request.target_path or Path(request.target))
         if request.action_type == ActionType.OPEN_PATH:
             return await self.actions.open_target(request.target)
+        if request.action_type == ActionType.SEARCH_FILES:
+            return await self.actions.search_files(
+                request.target_path or Path(request.target),
+                str(request.metadata.get("query", request.target)),
+            )
         if request.action_type == ActionType.LIST_FILES:
             return await self.actions.list_workspace_files(request.target_path or Path(request.target))
         if request.action_type == ActionType.PREVIEW_FILE:
             return await self.actions.preview_file(request.target_path or Path(request.target))
+        if request.action_type == ActionType.WRITE_TEXT_FILE:
+            return await self.actions.write_text_file(
+                request.target_path or Path(request.target),
+                str(request.metadata.get("content", "")),
+                overwrite=bool(request.metadata.get("overwrite", False)),
+            )
         if request.action_type == ActionType.RUN_WORKSPACE_COMMAND:
             return await self.actions.run_workspace_command(str(request.metadata.get("command_id", "")))
         if request.action_type == ActionType.LAUNCH_CLAUDE_INTERACTIVE:
@@ -155,3 +209,34 @@ class ActionRegistry:
         if request.action_type == ActionType.MEMORY_WRITE:
             return ActionResult(True, "Stored in local memory.")
         return ActionResult(False, f"No action handler is registered for {request.action_type.value}.")
+
+    def _verify_text_write(self, target_path: Path, content: str, *, overwrite: bool) -> dict[str, object]:
+        reasons: list[str] = []
+        safe = True
+        allowed_extensions = {".txt", ".md", ".rtf"}
+
+        if target_path.suffix.lower() not in allowed_extensions:
+            safe = False
+            reasons.append(f"extension {target_path.suffix or '[none]'} is not allowed for direct text writes")
+
+        if len(content) > self.settings.max_context_chars * 4:
+            safe = False
+            reasons.append("content exceeds direct-write size budget")
+
+        if looks_sensitive(content):
+            safe = False
+            reasons.append("content looks like it may contain secrets")
+
+        assessment = self.jail.classify(target_path)
+        if assessment.zone.value != "allowed_workspace":
+            safe = False
+            reasons.append(f"target is outside the allowed workspace: {assessment.zone.value}")
+
+        if target_path.exists() and not overwrite:
+            safe = False
+            reasons.append("target already exists and overwrite was not requested")
+
+        if not reasons:
+            reasons.append("direct text write passed workspace, extension, overwrite, and content checks")
+
+        return {"safe": safe, "reasons": tuple(reasons)}

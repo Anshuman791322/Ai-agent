@@ -1,8 +1,8 @@
 # JARVIS Windows Local
 
-Windows-first, local-first desktop assistant built with Python and PySide6.
+Windows-first desktop assistant built with Python and PySide6.
 
-It keeps the native desktop UI, tray behavior, local Ollama, local Whisper, Claude Code integration, voice activation, and now a constrained internet path, but still runs with bounded autonomy instead of free-form command execution.
+It keeps the native desktop UI, tray behavior, local Whisper, Gemini Flash reasoning, Claude Code integration, voice activation, and a constrained internet path, but still runs with bounded autonomy instead of free-form command execution.
 
 ## What this app does
 
@@ -10,13 +10,15 @@ It keeps the native desktop UI, tray behavior, local Ollama, local Whisper, Clau
 - Qt system tray icon with hide/show, voice capture, health check, open Claude Code, pause, stop, and quit actions
 - Explicit opt-in startup-on-login that launches the packaged app hidden in the tray
 - Native Windows notifications for background task completion and degraded subsystem health
-- Local reasoning through Ollama
+- LLM responses through Gemini Flash using Windows Credential Manager or a backend-only environment variable
 - Local speech-to-text through faster-whisper
 - Always-on voice activation on Windows using the wake phrase `Jarvis`
 - Local SQLite chat and memory store
 - Policy-based action execution with approval only for higher-risk work
 - Safer Claude Code handoff with scoped paths, prompt sanitization, and audit logs
-- Constrained web search, fetch, open-result, and summarize tools with deterministic routing before Ollama
+- Constrained web search, fetch, open-result, and summarize tools with deterministic routing before model use
+- Natural app and file intents, including safer handling for Claude Code, Codex, Notepad, Word, Start Menu app lookup, and local file search
+- Research/write workflow that searches the web, drafts locally, writes only verified workspace text files, and opens the result
 - Lightweight local routines with starter presets and recent-run history
 - Packaging support with PyInstaller and an Inno Setup installer
 
@@ -36,11 +38,22 @@ pip install -r requirements-dev.txt
 pre-commit install
 ```
 
-4. Install and start Ollama, then pull the default model:
+4. Configure the Gemini API key from the app UI or as a user environment variable. Do not put it in source code, frontend files, or packaged assets.
+
+Preferred UI path:
+
+- Open the right-side `Gemini access` panel.
+- Paste the key into the hidden password field.
+- Press `SAVE KEY`.
+- Jarvis stores it in Windows Credential Manager for the current Windows user, then rechecks Gemini health.
+
+Environment fallback:
 
 ```powershell
-ollama pull qwen3.5:0.8b
+[Environment]::SetEnvironmentVariable("JARVIS_GEMINI_API_KEY", "<your-key>", "User")
 ```
+
+`GEMINI_API_KEY` is also accepted as a fallback. The Python backend reads the key from Windows Credential Manager first, then `JARVIS_GEMINI_API_KEY`, then `GEMINI_API_KEY`. It is not written into UI files, settings JSON, or packaged assets.
 
 5. Run the app:
 
@@ -52,7 +65,7 @@ python app.py
 
 - Voice transcription uses `base.en`.
 - Voice activation is enabled by default. Say `Jarvis` and then the command.
-- Ollama uses `qwen3.5:0.8b` by default.
+- Gemini uses `gemini-2.5-flash` by default through Windows Credential Manager, `JARVIS_GEMINI_API_KEY`, or the fallback `GEMINI_API_KEY`.
 - Startup on login is off by default and must be enabled explicitly from the UI or `/startup on`.
 - Claude Code launches in `C:\Users\anshu\Downloads\Codex`.
 - Settings, logs, audit history, and SQLite state live under `%LOCALAPPDATA%\JarvisWindowsLocal`.
@@ -80,12 +93,14 @@ The assistant is designed for bounded autonomy, not constant confirmation.
 
 - Reading files inside the approved workspace
 - Listing workspace files
-- Opening approved app aliases such as Explorer, Chrome, PowerShell, VS Code, and Claude Code
+- Opening approved app aliases such as Explorer, Chrome, Edge, Notepad, Word, Codex, VS Code, and Claude Code
 - Opening approved browser destinations
 - Constrained web search, readable fetch, and page summaries through the built-in internet tools
 - Opening a numbered cached search result in Chrome
+- Searching file names inside the approved workspace
+- Creating new `.txt`, `.md`, or `.rtf` files inside the approved workspace after direct-write safety checks
 - Running curated repo-local commands such as `pytest`, `ruff-check`, and `ruff-format`
-- Local Ollama reasoning with a fixed base system prompt plus explicit untrusted reference notes when context is enabled
+- Gemini Flash reasoning with a fixed base system prompt plus explicit untrusted reference notes when context is enabled
 - Claude Code tasks inside the approved workspace when the handoff stays within policy budget, passes envelope validation, and does not include sensitive context
 
 ### What asks for approval
@@ -95,6 +110,8 @@ The assistant is designed for bounded autonomy, not constant confirmation.
 - High-risk file access in sensitive locations
 - Unknown executable launches
 - Destructive or potentially destructive operations
+- File searches outside the allowlisted workspace, such as Documents, Downloads, Desktop, or the broader user profile
+- Any direct text write outside the allowlisted workspace
 - Actions that exceed policy budgets
 - External handoff that would include sensitive local data
 
@@ -103,7 +120,7 @@ The assistant is designed for bounded autonomy, not constant confirmation.
 - Critical-risk actions
 - Forbidden-zone access
 - Legacy advanced shell execution and arbitrary PowerShell command routing
-- Remote model endpoints unless explicitly enabled in settings
+- Arbitrary model endpoints. Gemini requests are restricted to the official Google Generative Language endpoint.
 
 ## Claude Code handoff rules
 
@@ -130,7 +147,7 @@ Sensitive-tagged memory is never injected into Claude automatically.
 - Raw wake transcripts are not logged or stored
 - Conversation and memory text are redacted for likely secrets before being stored
 - Memory can be listed and deleted from the built-in commands
-- Desktop context and memory notes are passed to Ollama as explicit untrusted reference messages, not concatenated into the base system prompt
+- Desktop context and memory notes are passed to Gemini as explicit untrusted reference messages, not concatenated into the base system prompt
 - Audit logs record decisions and actions without dumping full sensitive prompts unless debug logging is explicitly enabled
 
 ## UI and control behavior
@@ -145,6 +162,7 @@ The UI shows:
 - subsystem health, including the internet path
 - routine availability, last routine status, and recent routine runs
 - background assistant status, startup-on-login state, and tray behavior
+- Gemini key status and a hidden key entry field backed by Windows Credential Manager
 - the explicit internet command surface for search, fetch, and summarize
 
 ### Routine behavior
@@ -174,7 +192,7 @@ Emergency controls:
 - `/search` runs a constrained DuckDuckGo HTML search and caches a small numbered result list locally.
 - `/open-result <n>` opens a cached result in Chrome.
 - `/fetch <url-or-n>` downloads readable page text only and keeps the response short.
-- `/summarize <url-or-n>` produces a short deterministic local summary from the fetched page instead of handing the task straight to Ollama.
+- `/summarize <url-or-n>` produces a short deterministic summary from the fetched page instead of handing the task straight to the model.
 - Natural commands such as `search the web for ...`, `open result 1`, `fetch page 2`, and `summarize https://...` route into the same tool path before model inference.
 - Requests fail cleanly when the network is unavailable or the target is not a public HTTP(S) page.
 
@@ -204,9 +222,19 @@ Emergency controls:
 - `/save-routine <name> :: <step>; <step>; ...`
 - `/delete-routine <name>`
 - `/open <url-or-path>`
+- `/find <file-name> [in <folder>]`
 - `/list [path]`
 - `/preview <file>`
 - `/run <pytest|ruff-check|ruff-format>`
+
+Natural command examples:
+
+- `open claude code` opens the Claude Code CLI workspace.
+- `open claude on chrome` opens the Claude web app in Chrome.
+- `open codex` or `open code x` opens the Codex app through the allowlisted app resolver or Start Menu lookup.
+- `find file notes.txt` searches the approved workspace.
+- `find file notes.txt on my pc` is policy-gated because it searches outside the approved workspace.
+- `write an essay about AI in notepad` runs a bounded web research and local draft workflow, writes a verified text file under the workspace, then opens it.
 
 Routine step syntax:
 
@@ -271,6 +299,8 @@ Installer output is created under:
 
 - `installer-output\`
 
+The installer is per-user by default and installs to `%LOCALAPPDATA%\Programs\JARVIS Local`, so it can update the app without requiring an elevated shell. Older machine-wide installs under `C:\Program Files\JARVIS Local` may still exist until removed manually.
+
 ### Runtime paths
 
 The packaged app does not write logs, settings, audit logs, temp task scopes, or SQLite data into the install directory. Runtime files stay under:
@@ -285,6 +315,6 @@ If startup on login is enabled, the packaged build registers the installed execu
 - If startup on login does not stick, confirm the app can write the current user `Run` key and that you enabled it from the background assistant panel or `/startup on`.
 - If internet tools show degraded health, check basic network access and retry `/search`; the feature fails closed when it cannot reach the network.
 - If the app fails before the window opens, check `%LOCALAPPDATA%\JarvisWindowsLocal\jarvis.log`.
-- If Ollama health is degraded, make sure Ollama is running on `127.0.0.1:11434` and the configured model is installed.
+- If Gemini health is degraded, save the key in the `Gemini access` UI panel or confirm `JARVIS_GEMINI_API_KEY` or `GEMINI_API_KEY` is set for the current Windows user and network access to `generativelanguage.googleapis.com` is available.
 - If Whisper health is degraded, reinstall the environment and rebuild so the faster-whisper native dependencies are included.
 - If a packaged build reports missing DLLs, rebuild from a clean virtual environment and rerun `.\build.ps1 -Clean`.

@@ -27,13 +27,13 @@ def isolated_windows_env(monkeypatch, tmp_path):
         monkeypatch.setenv(name, str(path))
 
     for name in (
-        "JARVIS_OLLAMA_BASE_URL",
-        "JARVIS_OLLAMA_MODEL",
+        "JARVIS_GEMINI_API_BASE_URL",
+        "JARVIS_GEMINI_API_KEY",
+        "JARVIS_GEMINI_MODEL",
         "JARVIS_WHISPER_MODEL",
         "JARVIS_VOICE_WAKE_PHRASE",
         "JARVIS_AUTONOMY_MODE",
         "JARVIS_ADVANCED_SHELL",
-        "JARVIS_REMOTE_MODEL_ENDPOINT",
     ):
         monkeypatch.delenv(name, raising=False)
 

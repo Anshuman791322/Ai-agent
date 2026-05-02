@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QPushButton,
     QScrollArea,
@@ -41,6 +42,8 @@ class MainWindow(QMainWindow):
     clear_approvals_requested = Signal()
     voice_toggle_requested = Signal()
     startup_toggle_requested = Signal()
+    gemini_key_save_requested = Signal(str)
+    gemini_key_clear_requested = Signal()
 
     def __init__(self, settings: AppSettings, parent=None) -> None:
         super().__init__(parent)
@@ -96,6 +99,7 @@ class MainWindow(QMainWindow):
         right_column.setContentsMargins(0, 0, 12, 0)
         right_column.addWidget(self._build_context_panel(central))
         right_column.addWidget(self._build_status_panel(central))
+        right_column.addWidget(self._build_gemini_key_panel(central))
         right_column.addWidget(self._build_internet_panel(central))
         right_column.addWidget(self._build_security_panel(central))
         right_column.addWidget(self._build_background_panel(central))
@@ -168,7 +172,7 @@ class MainWindow(QMainWindow):
         self.title_label = QLabel("JARVIS // WINDOWS COMMAND CENTER", frame)
         self.title_label.setObjectName("heroTitleLabel")
         self.subtitle_label = QLabel(
-            f"LOCAL-FIRST // ALWAYS-LISTENING // {self.settings.ollama_model.upper()} // {self.settings.whisper_model_size.upper()}",
+            f"WINDOWS-FIRST // ALWAYS-LISTENING // {self.settings.gemini_model.upper()} // {self.settings.whisper_model_size.upper()}",
             frame,
         )
         self.subtitle_label.setObjectName("heroSubtitleLabel")
@@ -275,6 +279,50 @@ class MainWindow(QMainWindow):
             grid.addWidget(name_label, row, 0)
             grid.addWidget(detail_label, row, 1)
         layout.addLayout(grid)
+        return frame
+
+    def _build_gemini_key_panel(self, parent: QWidget) -> QFrame:
+        frame = QFrame(parent)
+        frame.setObjectName("panelFrame")
+        layout = QVBoxLayout(frame)
+        self._configure_panel_layout(layout)
+
+        title = QLabel("Gemini access", frame)
+        title.setObjectName("panelTitleLabel")
+        subtitle = QLabel("Backend-only key storage", frame)
+        subtitle.setObjectName("panelSubTitleLabel")
+        self.gemini_key_state_label = QLabel("Key state: checking secure storage", frame)
+        self.gemini_key_state_label.setObjectName("panelBodyLabel")
+        self.gemini_key_state_label.setWordWrap(True)
+        helper = QLabel(
+            "Paste a Gemini key here to save it in Windows Credential Manager. The field is hidden and never logged.",
+            frame,
+        )
+        helper.setObjectName("panelBodyMuted")
+        helper.setWordWrap(True)
+        self.gemini_key_input = QLineEdit(frame)
+        self.gemini_key_input.setObjectName("secretLineEdit")
+        self.gemini_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.gemini_key_input.setPlaceholderText("Paste Gemini API key")
+        self.gemini_key_input.setMaxLength(256)
+        self.gemini_key_input.setClearButtonEnabled(True)
+
+        button_row = QHBoxLayout()
+        button_row.setSpacing(8)
+        self.gemini_key_save_button = QPushButton("SAVE KEY", frame)
+        self.gemini_key_save_button.setObjectName("quickActionButton")
+        self.gemini_key_clear_button = QPushButton("CLEAR KEY", frame)
+        self.gemini_key_clear_button.setObjectName("quickActionButton")
+        button_row.addWidget(self.gemini_key_save_button)
+        button_row.addWidget(self.gemini_key_clear_button)
+        button_row.addStretch(1)
+
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+        layout.addWidget(self.gemini_key_state_label)
+        layout.addWidget(helper)
+        layout.addWidget(self.gemini_key_input)
+        layout.addLayout(button_row)
         return frame
 
     def _build_internet_panel(self, parent: QWidget) -> QFrame:
@@ -468,6 +516,13 @@ class MainWindow(QMainWindow):
         self.startup_toggle_button.clicked.connect(self.startup_toggle_requested.emit)
         self.approve_button.clicked.connect(self.approve_requested.emit)
         self.deny_button.clicked.connect(self.deny_requested.emit)
+        self.gemini_key_save_button.clicked.connect(self._save_gemini_key_from_ui)
+        self.gemini_key_clear_button.clicked.connect(self.gemini_key_clear_requested.emit)
+
+    def _save_gemini_key_from_ui(self) -> None:
+        key = self.gemini_key_input.text().strip()
+        self.gemini_key_input.clear()
+        self.gemini_key_save_requested.emit(key)
 
     def _emit_mode_change(self) -> None:
         self.autonomy_mode_changed.emit(str(self.mode_selector.currentData()))
@@ -549,6 +604,17 @@ class MainWindow(QMainWindow):
                 padding: 8px 12px;
                 border-radius: 10px;
                 min-width: 210px;
+            }
+            QLineEdit#secretLineEdit {
+                background-color: rgba(8, 15, 18, 0.92);
+                border: 1px solid rgba(144, 255, 205, 0.24);
+                color: #e8fff8;
+                padding: 10px 12px;
+                border-radius: 10px;
+                font-size: 12px;
+            }
+            QLineEdit#secretLineEdit:focus {
+                border: 1px solid rgba(140, 247, 176, 0.72);
             }
             QLabel#metricCardTitle {
                 color: rgba(212, 255, 245, 0.72);
@@ -807,6 +873,13 @@ class MainWindow(QMainWindow):
         )
         self.startup_toggle_button.setText("DISABLE STARTUP" if start_on_login else "ENABLE STARTUP")
         self.status_badges.update_policy_badges(payload, self._approvals_payload)
+
+    def update_gemini_key_state(self, payload: dict) -> None:
+        has_key = bool(payload.get("has_key", False))
+        source = str(payload.get("source", "missing"))
+        detail = str(payload.get("detail", "Gemini key state unavailable"))
+        prefix = "stored" if has_key else "missing"
+        self.gemini_key_state_label.setText(self._panel_text(f"Key state: {prefix} | source: {source} | {detail}"))
 
     def update_approval_state(self, payload: dict) -> None:
         self._approvals_payload = payload

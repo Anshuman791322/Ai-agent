@@ -15,11 +15,14 @@ import httpx
 _SEARCH_ENDPOINT = "https://html.duckduckgo.com/html/"
 _USER_AGENT = "JARVIS-Local/0.1 (+https://duckduckgo.com/)"
 _BLOCKED_HOSTS = {"localhost", "127.0.0.1", "::1"}
+_DUCKDUCKGO_HOSTS = {"duckduckgo.com", "html.duckduckgo.com", "www.duckduckgo.com"}
 _CONTENT_TAGS = {"p", "li", "h1", "h2", "h3", "blockquote", "pre", "code"}
 _IGNORED_TAGS = {"script", "style", "noscript", "svg", "canvas", "form", "footer", "nav"}
 _BOILERPLATE_TOKENS = {"nav", "menu", "footer", "sidebar", "cookie", "consent", "share", "social", "ad"}
 _WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9'-]{2,}")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_MAX_RESPONSE_BYTES = 2_000_000
+_MAX_REDIRECTS = 3
 
 
 def _clean_text(value: str) -> str:
@@ -64,7 +67,8 @@ def _resolve_duckduckgo_href(href: str) -> str:
     elif href.startswith("/"):
         href = urljoin("https://duckduckgo.com", href)
     parsed = urlparse(href)
-    if parsed.hostname and parsed.hostname.endswith("duckduckgo.com"):
+    host = (parsed.hostname or "").lower()
+    if host in _DUCKDUCKGO_HOSTS:
         redirect_target = parse_qs(parsed.query).get("uddg")
         if redirect_target:
             return redirect_target[0]
@@ -395,17 +399,59 @@ class ConstrainedWebTools:
         return _public_http_url(cleaned)
 
     async def _request(self, method: str, url: str, *, params: dict[str, str] | None = None) -> httpx.Response:
-        timeout = httpx.Timeout(8.0, connect=4.0)
+        timeout = httpx.Timeout(connect=4.0, read=6.0, write=4.0, pool=2.0)
         headers = {"User-Agent": _USER_AGENT, "Accept-Language": "en-US,en;q=0.8"}
         async with httpx.AsyncClient(
             timeout=timeout,
-            follow_redirects=True,
+            follow_redirects=False,
             headers=headers,
             transport=self._transport,
         ) as client:
-            response = await client.request(method, url, params=params)
-            response.raise_for_status()
-            return response
+            current_url = url
+            current_params: dict[str, str] | None = params
+            for _ in range(_MAX_REDIRECTS + 1):
+                response = await self._send_capped(client, method, current_url, current_params)
+                if not response.is_redirect:
+                    response.raise_for_status()
+                    return response
+                location = response.headers.get("location", "")
+                if not location:
+                    response.raise_for_status()
+                    return response
+                next_url = urljoin(str(response.url), location)
+                if _public_http_url(next_url) is None:
+                    raise httpx.HTTPError(f"redirect to disallowed target blocked: {next_url}")
+                current_url = next_url
+                current_params = None
+                response.close()
+            raise httpx.HTTPError("too many redirects")
+
+    @staticmethod
+    async def _send_capped(
+        client: httpx.AsyncClient,
+        method: str,
+        url: str,
+        params: dict[str, str] | None,
+    ) -> httpx.Response:
+        request = client.build_request(method, url, params=params)
+        response = await client.send(request, stream=True)
+        try:
+            content_length = response.headers.get("content-length")
+            if content_length is not None:
+                try:
+                    if int(content_length) > _MAX_RESPONSE_BYTES:
+                        raise httpx.HTTPError(f"response advertises {content_length} bytes; cap is {_MAX_RESPONSE_BYTES}")
+                except ValueError:
+                    pass
+            buffered = bytearray()
+            async for chunk in response.aiter_bytes():
+                buffered.extend(chunk)
+                if len(buffered) > _MAX_RESPONSE_BYTES:
+                    raise httpx.HTTPError(f"response exceeded {_MAX_RESPONSE_BYTES} byte cap during read")
+            response._content = bytes(buffered)
+        finally:
+            await response.aclose()
+        return response
 
     def _set_status(self, state: str, detail: str) -> None:
         with self._lock:

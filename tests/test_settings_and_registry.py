@@ -26,8 +26,10 @@ def test_app_settings_load_sanitizes_untrusted_config(tmp_path):
             {
                 "autonomy_mode": "reckless",
                 "allow_remote_model_endpoint": False,
-                "ollama_base_url": "https://example.com",
-                "ollama_model": "bad model!",
+                "gemini_api_base_url": "https://example.com",
+                "gemini_api_key_env": "bad env",
+                "gemini_model": "bad model!",
+                "ollama_model": "legacy",
                 "advanced_shell_enabled": True,
                 "voice_activation_engine": "openwakeword",
                 "log_raw_wake_transcripts": True,
@@ -48,8 +50,10 @@ def test_app_settings_load_sanitizes_untrusted_config(tmp_path):
     loaded = AppSettings.load()
 
     assert loaded.autonomy_mode == AutonomyMode.BALANCED
-    assert loaded.ollama_base_url == "http://127.0.0.1:11434"
-    assert loaded.ollama_model == "qwen3.5:0.8b"
+    assert loaded.llm_provider == "gemini"
+    assert loaded.gemini_api_base_url == "https://generativelanguage.googleapis.com/v1beta"
+    assert loaded.gemini_api_key_env == "JARVIS_GEMINI_API_KEY"
+    assert loaded.gemini_model == "gemini-2.5-flash"
     assert loaded.voice_activation_engine == "transcript"
     assert loaded.start_on_login is True
     assert loaded.allowed_workspace_roots[0] == str(workspace.resolve())
@@ -60,7 +64,8 @@ def test_app_settings_load_sanitizes_untrusted_config(tmp_path):
     assert any("autonomy_mode" in warning for warning in loaded.validation_warnings)
     assert any("advanced_shell_enabled" in warning for warning in loaded.validation_warnings)
     assert any("log_raw_wake_transcripts" in warning for warning in loaded.validation_warnings)
-    assert any("remote model endpoints are disabled" in warning for warning in loaded.validation_warnings)
+    assert any("official Google Generative Language endpoint" in warning for warning in loaded.validation_warnings)
+    assert any("legacy Ollama settings" in warning for warning in loaded.validation_warnings)
 
     persisted = json.loads(config_file.read_text(encoding="utf-8"))
     assert "advanced_shell_enabled" not in persisted

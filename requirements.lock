@@ -28,7 +28,6 @@ huggingface_hub==1.11.0
 identify==2.6.19
 idna==3.11
 iniconfig==2.3.0
-joblib==1.5.3
 license-expression==30.4.4
 markdown-it-py==4.0.0
 mdurl==0.1.2
@@ -37,7 +36,6 @@ msgpack==1.1.2
 nodeenv==1.10.0
 numpy==2.4.4
 onnxruntime==1.24.4
-openwakeword==0.6.0
 packageurl-python==0.17.6
 packaging==26.1
 pefile==2024.8.26
@@ -66,8 +64,6 @@ pywinauto==0.6.9
 PyYAML==6.0.3
 requests==2.33.1
 rich==15.0.0
-scikit-learn==1.8.0
-scipy==1.17.1
 setuptools==82.0.1
 shellingham==1.5.4
 shiboken6==6.11.0
@@ -76,7 +72,6 @@ sortedcontainers==2.4.0
 sounddevice==0.5.5
 stevedore==5.7.0
 sympy==1.14.0
-threadpoolctl==3.6.0
 tokenizers==0.22.2
 tomli==2.4.1
 tomli_w==1.2.0

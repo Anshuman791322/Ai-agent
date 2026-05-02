@@ -10,6 +10,7 @@ from memory.store import MemoryStore
 from security.context_manager import ContextBundle, ContextManager
 from security.handoff import HandoffManager
 from security.models import ActionRequest, ActionSource, ActionType, ContextSelection, DataSensitivity, HandoffEnvelope, HandoffType, MemoryTag
+from security.redaction import looks_sensitive
 from security.workspace import WorkspaceJail
 
 
@@ -125,13 +126,19 @@ def test_memory_store_migrates_legacy_memory_schema(tmp_path):
     conn.close()
 
     store = MemoryStore(db_path)
-    conn = store._connect()
-    columns = {row["name"] for row in conn.execute("PRAGMA table_info(memory_items)").fetchall()}
-    conn.close()
+    with store._connect() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(memory_items)").fetchall()}
 
     assert "tag" in columns
     store.remember("general note", MemoryTag.GENERAL)
     assert store.list_memories(limit=5)[0]["tag"] == "general"
+
+
+def test_sensitivity_detection_avoids_plain_key_false_positive():
+    assert not looks_sensitive("The key points about AI are data, models, and evaluation.")
+    assert not looks_sensitive("This article discusses browser cookies and session design.")
+    assert looks_sensitive("api key = sk-1234567890abcdef123456")
+    assert looks_sensitive("password is opensesame")
 
 
 def test_secured_claude_handoff_rejects_direct_unvalidated_execution(security_workspace_factory):

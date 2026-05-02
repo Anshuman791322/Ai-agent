@@ -2,33 +2,23 @@
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_all
 
 
 project_root = Path(globals().get("SPECPATH", Path.cwd())).resolve()
 
 datas = [
-    (str(project_root / "assets"), "assets"),
+    (str(project_root / "assets" / "app_icon.ico"), "assets"),
+    (str(project_root / "assets" / "app_icon.png"), "assets"),
 ]
 binaries = []
-hiddenimports = [
-    "openwakeword.model",
-    "openwakeword.utils",
-    "openwakeword.vad",
-    "onnxruntime",
-    "onnxruntime.capi.onnxruntime_inference_collection",
-    "onnxruntime.capi.onnxruntime_pybind11_state",
-]
+hiddenimports = []
 
-for package_name in ("faster_whisper", "ctranslate2", "av", "tokenizers", "openwakeword", "onnxruntime"):
-    if package_name in {"openwakeword", "onnxruntime"}:
-        continue
+for package_name in ("faster_whisper", "ctranslate2", "av", "tokenizers"):
     package_datas, package_binaries, package_hiddenimports = collect_all(package_name)
     datas += package_datas
     binaries += package_binaries
     hiddenimports += package_hiddenimports
-
-binaries += collect_dynamic_libs("onnxruntime")
 
 
 a = Analysis(
@@ -40,7 +30,18 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        "bandit",
+        "pip_audit",
+        "pre_commit",
+        "pytest",
+        "_pytest",
+        "openwakeword",
+        "sklearn",
+        "scipy",
+        "joblib",
+        "threadpoolctl",
+    ],
     noarchive=False,
 )
 pyz = PYZ(a.pure)

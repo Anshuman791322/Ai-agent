@@ -25,6 +25,9 @@ class ChatResult:
 
 
 class LLMProvider(ABC):
+    provider_name = "LLM"
+    requires_network = False
+
     @abstractmethod
     async def healthcheck(self) -> ProviderHealth:
         raise NotImplementedError
@@ -32,6 +35,9 @@ class LLMProvider(ABC):
     @abstractmethod
     async def chat(self, messages: list[ChatMessage], system_prompt: str) -> ChatResult:
         raise NotImplementedError
+
+    async def warm_start(self) -> ProviderHealth:
+        return await self.healthcheck()
 
     async def close(self) -> None:
         return None

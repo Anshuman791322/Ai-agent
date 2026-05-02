@@ -12,8 +12,9 @@ from security.models import AutonomyMode
 
 
 _MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9._:-]{1,80}$")
+_ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,80}$")
 _WINDOWS_APP_NAME_RE = re.compile(r"^[A-Za-z0-9 .:_/-]{1,80}$")
-_KNOWN_VOICE_ENGINES = {"transcript", "openwakeword"}
+_KNOWN_VOICE_ENGINES = {"transcript"}
 _KNOWN_WORKSPACE_COMMANDS = {"pytest", "ruff-check", "ruff-format"}
 _APPROVED_BROWSER_HOSTS = [
     "chatgpt.com",
@@ -140,15 +141,14 @@ class AppSettings:
     autonomy_mode: AutonomyMode = AutonomyMode.BALANCED
     allow_remote_model_endpoint: bool = False
     debug_sensitive_logging: bool = False
-    ollama_base_url: str = "http://127.0.0.1:11434"
-    ollama_model: str = "qwen3.5:0.8b"
-    ollama_timeout_seconds: float = 30.0
-    ollama_num_ctx: int = 2048
-    ollama_num_predict: int = 160
-    ollama_keep_alive: str = "30m"
-    ollama_auto_start: bool = True
-    ollama_auto_pull: bool = True
-    ollama_start_timeout_seconds: float = 20.0
+    llm_provider: str = "gemini"
+    gemini_api_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    gemini_api_key_env: str = "JARVIS_GEMINI_API_KEY"
+    gemini_model: str = "gemini-2.5-flash"
+    gemini_timeout_seconds: float = 30.0
+    gemini_max_output_tokens: int = 768
+    gemini_temperature: float = 0.25
+    gemini_disable_thinking: bool = True
     whisper_model_size: str = "base.en"
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
@@ -159,7 +159,7 @@ class AppSettings:
     whisper_preload_on_startup: bool = True
     whisper_initial_prompt: str = (
         "This is a Windows desktop assistant command. Important phrases include "
-        "Jarvis, Claude Code, File Explorer, Ollama, Visual Studio Code, and Chrome."
+        "Jarvis, Claude Code, Codex, File Explorer, Gemini, Visual Studio Code, and Chrome."
     )
     whisper_hotwords: list[str] = field(
         default_factory=lambda: [
@@ -167,7 +167,8 @@ class AppSettings:
             "Claude Code",
             "PowerShell",
             "File Explorer",
-            "Ollama",
+            "Gemini",
+            "Codex",
             "Visual Studio Code",
             "Chrome",
         ]
@@ -246,15 +247,14 @@ class AppSettings:
             "autonomy_mode": self.autonomy_mode.value,
             "allow_remote_model_endpoint": self.allow_remote_model_endpoint,
             "debug_sensitive_logging": self.debug_sensitive_logging,
-            "ollama_base_url": self.ollama_base_url,
-            "ollama_model": self.ollama_model,
-            "ollama_timeout_seconds": self.ollama_timeout_seconds,
-            "ollama_num_ctx": self.ollama_num_ctx,
-            "ollama_num_predict": self.ollama_num_predict,
-            "ollama_keep_alive": self.ollama_keep_alive,
-            "ollama_auto_start": self.ollama_auto_start,
-            "ollama_auto_pull": self.ollama_auto_pull,
-            "ollama_start_timeout_seconds": self.ollama_start_timeout_seconds,
+            "llm_provider": self.llm_provider,
+            "gemini_api_base_url": self.gemini_api_base_url,
+            "gemini_api_key_env": self.gemini_api_key_env,
+            "gemini_model": self.gemini_model,
+            "gemini_timeout_seconds": self.gemini_timeout_seconds,
+            "gemini_max_output_tokens": self.gemini_max_output_tokens,
+            "gemini_temperature": self.gemini_temperature,
+            "gemini_disable_thinking": self.gemini_disable_thinking,
             "whisper_model_size": self.whisper_model_size,
             "whisper_device": self.whisper_device,
             "whisper_compute_type": self.whisper_compute_type,
@@ -326,19 +326,19 @@ class AppSettings:
         settings.autonomy_mode = cls._parse_mode(raw.get("autonomy_mode"), settings.validation_warnings)
         settings.allow_remote_model_endpoint = _parse_bool(raw.get("allow_remote_model_endpoint"), settings.allow_remote_model_endpoint)
         settings.debug_sensitive_logging = _parse_bool(raw.get("debug_sensitive_logging"), settings.debug_sensitive_logging)
-        settings.ollama_base_url = cls._parse_ollama_url(
-            raw.get("ollama_base_url"),
-            allow_remote=settings.allow_remote_model_endpoint,
-            warnings=settings.validation_warnings,
+        settings.llm_provider = cls._parse_llm_provider(raw.get("llm_provider"), settings.validation_warnings)
+        settings.gemini_api_base_url = cls._parse_gemini_url(raw.get("gemini_api_base_url"), settings.validation_warnings)
+        settings.gemini_api_key_env = _parse_string(
+            raw.get("gemini_api_key_env"),
+            settings.gemini_api_key_env,
+            pattern=_ENV_NAME_RE,
+            max_len=80,
         )
-        settings.ollama_model = cls._parse_model_name(raw.get("ollama_model"), settings.ollama_model, settings.validation_warnings)
-        settings.ollama_timeout_seconds = _parse_float(raw.get("ollama_timeout_seconds"), settings.ollama_timeout_seconds, 5.0, 120.0)
-        settings.ollama_num_ctx = _parse_int(raw.get("ollama_num_ctx"), settings.ollama_num_ctx, 512, 32768)
-        settings.ollama_num_predict = _parse_int(raw.get("ollama_num_predict"), settings.ollama_num_predict, 32, 4096)
-        settings.ollama_keep_alive = _parse_string(raw.get("ollama_keep_alive"), settings.ollama_keep_alive, max_len=16)
-        settings.ollama_auto_start = _parse_bool(raw.get("ollama_auto_start"), settings.ollama_auto_start)
-        settings.ollama_auto_pull = _parse_bool(raw.get("ollama_auto_pull"), settings.ollama_auto_pull)
-        settings.ollama_start_timeout_seconds = _parse_float(raw.get("ollama_start_timeout_seconds"), settings.ollama_start_timeout_seconds, 3.0, 120.0)
+        settings.gemini_model = cls._parse_model_name(raw.get("gemini_model"), settings.gemini_model, settings.validation_warnings)
+        settings.gemini_timeout_seconds = _parse_float(raw.get("gemini_timeout_seconds"), settings.gemini_timeout_seconds, 5.0, 120.0)
+        settings.gemini_max_output_tokens = _parse_int(raw.get("gemini_max_output_tokens"), settings.gemini_max_output_tokens, 64, 8192)
+        settings.gemini_temperature = _parse_float(raw.get("gemini_temperature"), settings.gemini_temperature, 0.0, 2.0)
+        settings.gemini_disable_thinking = _parse_bool(raw.get("gemini_disable_thinking"), settings.gemini_disable_thinking)
         settings.whisper_model_size = _parse_string(raw.get("whisper_model_size"), settings.whisper_model_size, max_len=32)
         settings.whisper_device = _parse_string(raw.get("whisper_device"), settings.whisper_device, max_len=16)
         settings.whisper_compute_type = _parse_string(raw.get("whisper_compute_type"), settings.whisper_compute_type, max_len=16)
@@ -434,18 +434,26 @@ class AppSettings:
         return value
 
     @staticmethod
-    def _parse_ollama_url(raw: Any, *, allow_remote: bool, warnings: list[str]) -> str:
-        default = "http://127.0.0.1:11434"
+    def _parse_llm_provider(raw: Any, warnings: list[str]) -> str:
+        value = _parse_string(raw, "gemini", max_len=32).lower()
+        if value != "gemini":
+            warnings.append("invalid llm_provider was replaced with gemini")
+            return "gemini"
+        return value
+
+    @staticmethod
+    def _parse_gemini_url(raw: Any, warnings: list[str]) -> str:
+        default = "https://generativelanguage.googleapis.com/v1beta"
         value = _parse_string(raw, default, max_len=200)
         parsed = urlparse(value)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            warnings.append("invalid ollama_base_url was replaced with local default")
+        if parsed.scheme != "https" or not parsed.netloc:
+            warnings.append("invalid gemini_api_base_url was replaced with the official Gemini endpoint")
             return default
         host = (parsed.hostname or "").lower()
-        if not allow_remote and host not in {"127.0.0.1", "localhost"}:
-            warnings.append("remote model endpoints are disabled by default; using local Ollama URL")
+        if host != "generativelanguage.googleapis.com":
+            warnings.append("Gemini requests are restricted to the official Google Generative Language endpoint")
             return default
-        return value
+        return value.rstrip("/")
 
     @staticmethod
     def _parse_voice_engine(raw: Any, warnings: list[str]) -> str:
@@ -494,8 +502,8 @@ class AppSettings:
 
     @staticmethod
     def _apply_legacy_migrations(settings: "AppSettings", raw: dict[str, Any]) -> None:
-        if raw.get("ollama_model") == "qwen2.5:3b":
-            settings.ollama_model = "qwen3.5:0.8b"
+        if any(key.startswith("ollama_") for key in raw):
+            settings.validation_warnings.append("legacy Ollama settings are ignored; Gemini Flash is the active LLM provider")
         if raw.get("voice_activation_engine") == "openwakeword":
             settings.voice_activation_engine = "transcript"
         if raw.get("window_title") == "JARVIS // LOCAL CONSOLE":
@@ -509,10 +517,6 @@ class AppSettings:
 
     @staticmethod
     def _apply_env_overrides(settings: "AppSettings") -> None:
-        remote_override = os.getenv("JARVIS_REMOTE_MODEL_ENDPOINT")
-        if remote_override:
-            settings.allow_remote_model_endpoint = _parse_bool(remote_override, settings.allow_remote_model_endpoint)
-
         mode_override = os.getenv("JARVIS_AUTONOMY_MODE")
         if mode_override:
             settings.autonomy_mode = AppSettings._parse_mode(mode_override, settings.validation_warnings)
@@ -520,19 +524,18 @@ class AppSettings:
         if os.getenv("JARVIS_ADVANCED_SHELL"):
             settings.validation_warnings.append("JARVIS_ADVANCED_SHELL is ignored; the advanced shell surface was removed")
 
-        base_url_override = os.getenv("JARVIS_OLLAMA_BASE_URL")
+        base_url_override = os.getenv("JARVIS_GEMINI_API_BASE_URL")
         if base_url_override:
-            settings.ollama_base_url = AppSettings._parse_ollama_url(
+            settings.gemini_api_base_url = AppSettings._parse_gemini_url(
                 base_url_override,
-                allow_remote=settings.allow_remote_model_endpoint,
                 warnings=settings.validation_warnings,
             )
 
-        model_override = os.getenv("JARVIS_OLLAMA_MODEL")
+        model_override = os.getenv("JARVIS_GEMINI_MODEL")
         if model_override:
-            settings.ollama_model = AppSettings._parse_model_name(
+            settings.gemini_model = AppSettings._parse_model_name(
                 model_override,
-                settings.ollama_model,
+                settings.gemini_model,
                 settings.validation_warnings,
             )
 

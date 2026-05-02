@@ -94,6 +94,13 @@ class PolicyEngine:
             risk = _max_risk(risk, RiskTier.HIGH)
             reasons.append("guardrail-affecting settings changes require explicit approval")
 
+        if request.action_type == ActionType.WRITE_TEXT_FILE:
+            if not request.metadata.get("safety_verified", False):
+                risk = _max_risk(risk, RiskTier.HIGH)
+                reasons.extend(str(reason) for reason in request.metadata.get("safety_reasons", ()))
+            else:
+                reasons.extend(str(reason) for reason in request.metadata.get("safety_reasons", ()))
+
         if request.privilege_escalation:
             risk = _max_risk(risk, RiskTier.CRITICAL)
             reasons.append("privilege escalation potential detected")
@@ -156,11 +163,20 @@ class PolicyEngine:
             ActionType.OPEN_APP,
             ActionType.OPEN_URL,
             ActionType.OPEN_EXPLORER,
+            ActionType.SEARCH_FILES,
             ActionType.LIST_FILES,
             ActionType.PREVIEW_FILE,
             ActionType.MEMORY_WRITE,
         } and trust_zone in {TrustZone.ALLOWED_WORKSPACE, TrustZone.UNKNOWN}:
             balanced_auto = True
+
+        if (
+            request.action_type == ActionType.WRITE_TEXT_FILE
+            and trust_zone == TrustZone.ALLOWED_WORKSPACE
+            and request.metadata.get("safety_verified", False)
+        ):
+            balanced_auto = True
+            risk = _max_risk(risk, RiskTier.MEDIUM)
 
         if request.action_type == ActionType.RUN_WORKSPACE_COMMAND and trust_zone == TrustZone.ALLOWED_WORKSPACE:
             balanced_auto = True

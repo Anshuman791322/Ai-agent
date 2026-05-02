@@ -5,6 +5,8 @@ import contextlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
+import os
+from pathlib import Path
 import re
 import threading
 from typing import Any
@@ -15,11 +17,11 @@ from config.settings import AppSettings
 from core.app_state import AppState
 from core.event_bus import EventBus
 from integrations.windows_context import WindowContext, WindowsContextProbe
+from integrations.secret_store import GeminiKeyStore
 from integrations.web_tools import ConstrainedWebTools, WebToolResult
 from integrations.windows_startup import WindowsStartupRegistration
 from memory.store import MemoryStore
-from providers.llm.base import ChatMessage
-from providers.llm.ollama_provider import OllamaProvider
+from providers.llm.base import ChatMessage, LLMProvider
 from routines import (
     RoutineExecutionResult,
     RoutineNotFoundError,
@@ -66,7 +68,7 @@ class Orchestrator:
         state: AppState,
         bus: EventBus,
         memory: MemoryStore,
-        llm: OllamaProvider,
+        llm: LLMProvider,
         voice: WhisperSTT,
         actions: SystemActions,
         registry: ActionRegistry,
@@ -79,6 +81,7 @@ class Orchestrator:
         web_tools: ConstrainedWebTools | None = None,
         startup_manager: WindowsStartupRegistration | None = None,
         routine_service: RoutineService | None = None,
+        gemini_key_store: GeminiKeyStore | None = None,
     ) -> None:
         self.settings = settings
         self.state = state
@@ -97,6 +100,7 @@ class Orchestrator:
         self.web_tools = web_tools
         self.startup_manager = startup_manager
         self.routine_service = routine_service
+        self.gemini_key_store = gemini_key_store
 
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="jarvis-orchestrator")
@@ -129,11 +133,12 @@ class Orchestrator:
             self.refresh_context()
         if self.settings.whisper_preload_on_startup:
             asyncio.run_coroutine_threadsafe(self._warm_start_voice_stack(), self._loop)
-        asyncio.run_coroutine_threadsafe(self._warm_start_local_model(), self._loop)
+        asyncio.run_coroutine_threadsafe(self._warm_start_llm_provider(), self._loop)
         self.refresh_health()
         self._publish_policy_state()
         self._publish_approval_state()
         self._publish_routines_state()
+        self._publish_gemini_key_state()
 
     def shutdown(self) -> None:
         if self._voice_listener is not None:
@@ -227,6 +232,16 @@ class Orchestrator:
         enabled = not (self.startup_manager.state.enabled if self.startup_manager is not None else self.settings.start_on_login)
         asyncio.run_coroutine_threadsafe(self._set_startup_on_login(enabled), self._loop)
 
+    def save_gemini_api_key(self, api_key: str) -> None:
+        if not self._running:
+            return
+        asyncio.run_coroutine_threadsafe(self._save_gemini_api_key(api_key), self._loop)
+
+    def clear_gemini_api_key(self) -> None:
+        if not self._running:
+            return
+        asyncio.run_coroutine_threadsafe(self._clear_gemini_api_key(), self._loop)
+
     def set_notifier(self, notifier: Any | None) -> None:
         self._notifier = notifier
         if notifier is None:
@@ -302,7 +317,7 @@ class Orchestrator:
                 "/remember-sensitive <note>, /memories, /forget <id>, /approve, /deny, /pause, /deny-high, "
                 "/stop, /voice, /startup <on|off|status>, /search <query>, /open-result <n>, "
                 "/fetch <url-or-n>, /summarize <url-or-n>, /open <target>, /list [path], "
-                "/preview <file>, /run <pytest|ruff-check|ruff-format>, /routines, "
+                "/find <file-name> [in <folder>], /preview <file>, /run <pytest|ruff-check|ruff-format>, /routines, "
                 "/run-routine <name>, /save-routine <name> :: <step>; <step>, /delete-routine <name>."
             )
 
@@ -409,7 +424,7 @@ class Orchestrator:
             return "\n".join(f"{item['id']} [{item['tag']}] {item['content']}" for item in memories)
 
         if command == "/forget":
-            if not args.isdigit():
+            if not args.isdigit() or len(args) > 12:
                 return "Usage: /forget <memory-id>"
             removed = await asyncio.to_thread(self.memory.forget, int(args))
             return "Memory deleted." if removed else "Memory id not found."
@@ -418,6 +433,13 @@ class Orchestrator:
             request = self._build_open_request(args, source)
             if request is None:
                 return "Could not determine what to open."
+            return await self._execute_policy_request(request)
+
+        if command == "/find":
+            query, root = self._parse_file_search_args(args)
+            if not query:
+                return "Usage: /find <file-name> [in <folder>]"
+            request = self.registry.search_files_request(query, root, source)
             return await self._execute_policy_request(request)
 
         if command == "/list":
@@ -618,7 +640,8 @@ class Orchestrator:
         selection = self.context_manager.infer_selection(text, include_recent_chat=True)
         bundle = self.context_manager.build_context_bundle(text, selection, self._desktop_context, for_handoff=False)
         self._last_context_bundle = bundle
-        self._last_handoff_status = "local ollama"
+        provider_name = self._llm_provider_name()
+        self._last_handoff_status = provider_name.lower()
         self._publish_policy_state()
 
         system_prompt = self.settings.system_prompt
@@ -631,19 +654,20 @@ class Orchestrator:
             for item in self.context_manager.recent_chat_messages(limit=self.settings.memory_history_limit)
         )
 
-        self.state.set_status("llm", "busy", f"querying {self.settings.ollama_model}")
+        self.state.set_status("llm", "busy", f"querying {self.settings.gemini_model}")
         self._publish_status()
 
         self.audit.record(
             AuditEntry(
                 event_type="llm_request",
                 source=source,
-                message="Local Ollama request executed",
-                action_type="local_llm",
+                message=f"{provider_name} request executed",
+                action_type="llm_request",
                 decision="allow",
                 risk="low",
+                external_network=self._llm_requires_network(),
                 context_flags=tuple(bundle.selection.enabled()),
-                metadata={"context_notes": len(bundle.notes)},
+                metadata={"context_notes": len(bundle.notes), "provider": provider_name},
             )
         )
 
@@ -656,8 +680,8 @@ class Orchestrator:
             self.state.set_status("llm", "error", str(exc))
             self._publish_status()
             return (
-                "Ollama is unavailable. Start Ollama and make sure "
-                f"{self.settings.ollama_model} is installed. Policy-gated local actions still work."
+                f"{provider_name} is unavailable: {exc}. "
+                "Policy-gated local actions still work."
             )
 
     async def _handle_natural_command(self, text: str, source: ActionSource) -> str | None:
@@ -684,12 +708,17 @@ class Orchestrator:
             return self._list_routines_message()
 
         routine_match = re.match(
-            r"^(?:run|start|launch|execute)\s+(?:the\s+)?routine\s+(?P<name>.+)$",
+            r"^(?:run|start|launch|execute)\s+(?:the\s+)?routine\s+(?P<name>[A-Za-z0-9 _-]{1,64})$",
             text,
             flags=re.IGNORECASE,
         )
         if routine_match:
-            return await self._run_routine_by_name(routine_match.group("name"), source)
+            return await self._run_routine_by_name(routine_match.group("name").strip(), source)
+
+        research_write = self._extract_research_write_intent(text)
+        if research_write is not None:
+            topic, destination = research_write
+            return await self._handle_research_write_task(topic, destination, source)
 
         search_query = self._extract_web_search_query(text)
         if search_query:
@@ -706,6 +735,12 @@ class Orchestrator:
         fetch_target = self._extract_web_target(text, verbs=("fetch", "read page", "show page", "get page"))
         if fetch_target is not None:
             return await self._run_web_tool("fetch", fetch_target, source)
+
+        file_search = self._extract_file_search_intent(text)
+        if file_search is not None:
+            query, root = file_search
+            request = self.registry.search_files_request(query, root, source)
+            return await self._execute_policy_request(request)
 
         claude_task = self._extract_claude_task(text)
         if claude_task:
@@ -746,7 +781,11 @@ class Orchestrator:
             request = self.registry.workspace_command_request(command_id, source)
             return await self._execute_policy_request(request)
 
-        open_match = re.match(r"^(?:please\s+)?(?:open|launch|start|run)\s+(?P<target>.+)$", text, flags=re.IGNORECASE)
+        open_match = re.match(
+            r"^(?:(?:please|can you|could you|would you)\s+)?(?:open|launch|start|run)\s+(?P<target>.+)$",
+            text,
+            flags=re.IGNORECASE,
+        )
         if open_match:
             request = self._build_open_request(open_match.group("target"), source)
             if request is not None:
@@ -967,26 +1006,98 @@ class Orchestrator:
             self.routine_service.snapshot(active_routine=active_routine, status=status),
         )
 
+    def _publish_gemini_key_state(self) -> None:
+        if self.gemini_key_store is None:
+            self.bus.publish(
+                "gemini_key",
+                {"available": False, "has_key": False, "source": "missing", "detail": "Gemini key store unavailable"},
+            )
+            return
+        self.bus.publish("gemini_key", self.gemini_key_store.state().to_dict())
+
     def _publish_approval_state(self) -> None:
         self.bus.publish("approvals", self.approvals.snapshot())
 
-    async def _warm_start_local_model(self) -> None:
-        self.state.set_status("llm", "busy", f"warming {self.settings.ollama_model}")
+    def _llm_provider_name(self) -> str:
+        return str(getattr(self.llm, "provider_name", "LLM"))
+
+    def _llm_requires_network(self) -> bool:
+        return bool(getattr(self.llm, "requires_network", False))
+
+    async def _warm_start_llm_provider(self) -> None:
+        self.state.set_status("llm", "busy", f"checking {self.settings.gemini_model}")
         self._publish_status()
-        self._publish_log("system", f"Starting local model runtime for {self.settings.ollama_model}.")
+        self._publish_log("system", f"Checking {self._llm_provider_name()} provider for {self.settings.gemini_model}.")
 
         try:
             health = await self.llm.warm_start()
         except Exception as exc:
-            log.exception("Local model warm-start failed")
+            log.exception("LLM provider startup check failed")
             self.state.set_status("llm", "error", str(exc))
             self._publish_status()
-            self._publish_log("system", f"Local model warm-start failed: {exc}")
+            self._publish_log("system", f"LLM provider startup check failed: {exc}")
             return
 
         self.state.set_status("llm", health.state, health.detail)
         self._publish_status()
+        self._publish_gemini_key_state()
         self._publish_log("system", f"LLM startup: {health.detail}")
+
+    async def _save_gemini_api_key(self, api_key: str) -> None:
+        if self.gemini_key_store is None:
+            self._publish_log("system", "Gemini key store is unavailable.")
+            self._publish_gemini_key_state()
+            return
+        try:
+            await asyncio.to_thread(self.gemini_key_store.set_key, api_key)
+        except Exception as exc:
+            self.state.set_status("llm", "warn", f"Gemini key was not saved: {exc}")
+            self._publish_status()
+            self._publish_log("system", f"Gemini API key was not saved: {exc}")
+            self._publish_gemini_key_state()
+            return
+
+        invalidate = getattr(self.llm, "invalidate_health_cache", None)
+        if callable(invalidate):
+            invalidate()
+        self.audit.record(
+            AuditEntry(
+                event_type="secret_update",
+                source=ActionSource.INTERNAL,
+                message="Gemini API key saved to backend secret store",
+                action_type="settings_change",
+                decision="allow",
+                risk="medium",
+                metadata={"credential_label": "gemini_api_key", "stored": True},
+            )
+        )
+        self._publish_log("system", "Gemini API key saved to Windows Credential Manager.")
+        self._publish_gemini_key_state()
+        await self._warm_start_llm_provider()
+
+    async def _clear_gemini_api_key(self) -> None:
+        if self.gemini_key_store is None:
+            self._publish_gemini_key_state()
+            return
+        await asyncio.to_thread(self.gemini_key_store.clear_key)
+        invalidate = getattr(self.llm, "invalidate_health_cache", None)
+        if callable(invalidate):
+            invalidate()
+        self.audit.record(
+            AuditEntry(
+                event_type="secret_update",
+                source=ActionSource.INTERNAL,
+                message="Gemini API key removed from backend secret store",
+                action_type="settings_change",
+                decision="allow",
+                risk="medium",
+                metadata={"credential_label": "gemini_api_key", "stored": False},
+            )
+        )
+        self.state.set_status("llm", "warn", "Gemini Credential Manager key removed")
+        self._publish_status()
+        self._publish_log("system", "Gemini API key removed from Windows Credential Manager.")
+        self._publish_gemini_key_state()
 
     async def _warm_start_voice_stack(self) -> None:
         self._publish_log("system", f"Preloading local voice model {self.settings.whisper_model_size}.")
@@ -1260,13 +1371,15 @@ class Orchestrator:
             (r"\bclawed code\b", "claude code"),
             (r"\bclaude\s+(?:dode|doe|ode|odes|node|noodles|coda|coat|coats|cold|mode|load)\b", "claude code"),
             (r"\bcloud\s+(?:code|codes|node|odes|noodles)\b", "claude code"),
+            (r"\bcode\s+x\b", "codex"),
+            (r"\bco\s+dex\b", "codex"),
             (r"\bpower shell\b", "powershell"),
             (r"\bvisual studio\b", "visual studio code"),
         )
         for pattern, replacement in replacements:
             cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
         launch_match = re.match(
-            r"^(?P<prefix>(?:please\s+)?(?:open|launch|start|run))\s+(?P<target>.+)$",
+            r"^(?P<prefix>(?:(?:please|can you|could you|would you)\s+)?(?:open|launch|start|run))\s+(?P<target>.+)$",
             cleaned,
             flags=re.IGNORECASE,
         )
@@ -1297,6 +1410,185 @@ class Orchestrator:
             return False
         return bool(parts[0]) and bool(parts[1]) and " " not in parts[1]
 
+    def _parse_file_search_args(self, args: str) -> tuple[str, Path]:
+        cleaned = " ".join(args.strip().split())
+        if not cleaned:
+            return "", self.jail.default_workspace() or Path.home()
+        match = re.match(r"^(?P<query>.+?)\s+in\s+(?P<root>.+)$", cleaned, flags=re.IGNORECASE)
+        if match:
+            return match.group("query").strip(), self._resolve_search_root(match.group("root"))
+        return cleaned, self.jail.default_workspace() or Path.home()
+
+    def _extract_file_search_intent(self, text: str) -> tuple[str, Path] | None:
+        patterns = (
+            r"^(?:find|search(?:\s+for)?)\s+(?:a\s+)?(?:file|folder|document)\s+(?:named\s+|called\s+)?(?P<query>.+?)(?:\s+(?:on|in)\s+(?P<root>my pc|my computer|this pc|workspace|downloads|documents|desktop|.+))?$",
+            r"^(?:find|search(?:\s+for)?)\s+(?P<query>.+?)\s+(?:file|folder|document)(?:\s+(?:on|in)\s+(?P<root>my pc|my computer|this pc|workspace|downloads|documents|desktop|.+))?$",
+            r"^(?:where is|locate)\s+(?P<query>.+)$",
+        )
+        for pattern in patterns:
+            match = re.match(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            query = " ".join(match.group("query").strip(" .").split())
+            if not query:
+                return None
+            root_token = match.groupdict().get("root") or "workspace"
+            return query, self._resolve_search_root(root_token)
+        return None
+
+    def _resolve_search_root(self, token: str) -> Path:
+        normalized = token.strip().lower()
+        home = Path(os.getenv("USERPROFILE", str(Path.home()))).expanduser()
+        if normalized in {"my pc", "my computer", "this pc", "computer", "pc"}:
+            return home
+        if normalized == "workspace":
+            return self.jail.default_workspace() or home
+        known = {
+            "downloads": home / "Downloads",
+            "documents": home / "Documents",
+            "desktop": home / "Desktop",
+        }
+        if normalized in known:
+            return known[normalized]
+        return self.jail.resolve_path(token, base=self.jail.default_workspace())
+
+    def _extract_research_write_intent(self, text: str) -> tuple[str, str] | None:
+        normalized = text.strip()
+        patterns = (
+            r"^(?:please\s+)?(?:research\s+and\s+write|write|draft|create)\s+(?:an?\s+)?(?:essay|article|report|note|summary)\s+(?:about|on)\s+(?P<topic>.+?)(?:\s+(?:in|on)\s+(?P<destination>notepad|note pad|ms word|microsoft word|word))?$",
+            r"^(?:please\s+)?(?:do\s+)?(?:deep\s+)?research\s+(?:about|on)\s+(?P<topic>.+?)\s+and\s+write\s+(?:an?\s+)?(?:essay|article|report|note|summary)(?:\s+(?:in|on)\s+(?P<destination>notepad|note pad|ms word|microsoft word|word))?$",
+        )
+        for pattern in patterns:
+            match = re.match(pattern, normalized, flags=re.IGNORECASE)
+            if not match:
+                continue
+            topic = " ".join(match.group("topic").strip(" .").split())
+            topic = re.sub(r"\s+(?:in|on)\s+(?:notepad|note pad|ms word|microsoft word|word)$", "", topic, flags=re.IGNORECASE).strip()
+            destination = (match.groupdict().get("destination") or "notepad").lower().replace("note pad", "notepad")
+            if topic:
+                return topic, destination
+        return None
+
+    async def _handle_research_write_task(self, topic: str, destination: str, source: ActionSource) -> str:
+        self._publish_log("system", f"Research/write workflow started for: {sanitize_for_log(topic, max_chars=120)}")
+        research_notes = await self._collect_research_notes(topic, source)
+        draft = await self._generate_research_draft(topic, research_notes, source)
+        output_path = self._research_output_path(topic, destination)
+        content = self._to_rtf(draft) if output_path.suffix.lower() == ".rtf" else draft
+
+        write_request = self.registry.write_text_file_request(
+            output_path,
+            content,
+            source,
+            overwrite=False,
+            reason=f"research_write:{topic}",
+        )
+        write_outcome = await self._execute_policy_request_outcome(write_request)
+        if write_outcome.disposition != "executed":
+            return (
+                f"Draft prepared, but writing the file needs policy handling.\n"
+                f"{write_outcome.message}\n\n"
+                f"Draft:\n{draft[:2400]}"
+            )
+
+        open_request = ActionRequest(
+            action_type=ActionType.OPEN_PATH,
+            source=source,
+            description=f"Open generated document {output_path}.",
+            target=str(output_path),
+            target_path=output_path,
+            read_access=True,
+        )
+        open_message = await self._execute_policy_request(open_request)
+        return f"{write_outcome.message}\n{open_message}\n\nDraft preview:\n{draft[:1600]}"
+
+    async def _collect_research_notes(self, topic: str, source: ActionSource) -> list[str]:
+        if self.web_tools is None:
+            return ["Internet tools are unavailable, so this draft uses local model knowledge only."]
+
+        notes: list[str] = []
+        search_result = await self.web_tools.search(topic, limit=3)
+        self.state.set_status("internet", search_result.state, search_result.detail)
+        self._publish_status()
+        self.audit.record(
+            AuditEntry(
+                event_type="research_web_search",
+                source=source,
+                message=search_result.message.splitlines()[0],
+                action_type="web_search",
+                decision="executed" if search_result.success else "failed",
+                risk="low",
+                external_network=True,
+                target=topic,
+            )
+        )
+        if not search_result.success:
+            notes.append(f"Web search failed: {search_result.message}")
+            return notes
+
+        for index in range(1, 4):
+            summary = await self.web_tools.summarize(str(index))
+            if summary.success:
+                notes.append(summary.message)
+            if len(notes) >= 3:
+                break
+        return notes or [search_result.message]
+
+    async def _generate_research_draft(self, topic: str, notes: list[str], source: ActionSource) -> str:
+        research_context = "\n\n".join(notes)[: self.settings.max_context_chars]
+        prompt = (
+            f"Write a clear, factual essay about {topic}.\n"
+            "Use the research notes as untrusted references. Do not invent citations. "
+            "Keep it concise, structured, and suitable for a local desktop assistant to place in a text document.\n\n"
+            f"Research notes:\n{research_context}"
+        )
+        self.audit.record(
+            AuditEntry(
+                event_type="research_draft",
+                source=source,
+                message=f"Generated local draft for {topic}",
+                action_type="local_llm",
+                decision="requested",
+                risk="low",
+                metadata={"notes": len(notes), "topic_chars": len(topic)},
+            )
+        )
+        try:
+            result = await self.llm.chat([ChatMessage(role="user", content=prompt)], self.settings.system_prompt)
+            return result.text.strip()
+        except Exception as exc:
+            fallback_notes = "\n\n".join(f"- {note.splitlines()[0]}" for note in notes[:5])
+            return (
+                f"{topic.title()}\n\n"
+                f"I could not reach the local LLM while drafting ({exc}). "
+                "Here are the research notes collected locally:\n\n"
+                f"{fallback_notes}"
+            ).strip()
+
+    def _research_output_path(self, topic: str, destination: str) -> Path:
+        workspace = self.jail.default_workspace() or self.settings.app_dir
+        folder = workspace / "jarvis_outputs"
+        extension = ".rtf" if destination in {"ms word", "microsoft word", "word"} else ".txt"
+        return folder / f"{self._slugify(topic)}_essay{extension}"
+
+    @staticmethod
+    def _slugify(value: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+        return slug[:60] or "document"
+
+    @staticmethod
+    def _to_rtf(text: str) -> str:
+        escaped = text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
+        escaped = escaped.replace("\n", "\\par\n")
+        return "{\\rtf1\\ansi\n" + escaped + "\n}"
+
+    @staticmethod
+    def _normalize_browser_target_text(text: str) -> str:
+        cleaned = " ".join(text.strip().split())
+        cleaned = re.sub(r"\bchat\s+gpt\b", "chatgpt", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\bclaude\s+ai\b", "claude", cleaned, flags=re.IGNORECASE)
+        return cleaned.strip()
+
     def _desktop_context_text(self) -> str:
         with self._desktop_context_lock:
             snapshot = self._desktop_context
@@ -1311,7 +1603,7 @@ class Orchestrator:
             match = re.match(pattern, text, flags=re.IGNORECASE)
             if not match:
                 continue
-            target = self._normalize_user_text(match.group("target"))
+            target = self._normalize_browser_target_text(match.group("target"))
             browser = self._normalize_user_text(match.group("browser"))
             return target, browser
         return None
@@ -1380,13 +1672,13 @@ class Orchestrator:
         if not target:
             return None
 
-        browser_target = self.actions.resolve_site_target(target)
-        if browser_target is not None:
-            return self.registry.open_url_request(browser_target, "chrome", source)
-
         canonical = self.actions.canonicalize_launch_target(target)
         if canonical is not None:
             return self.registry.open_app_request(canonical, source)
+
+        browser_target = self.actions.resolve_site_target(target)
+        if browser_target is not None:
+            return self.registry.open_url_request(browser_target, "chrome", source)
 
         if self._looks_like_open_target(target):
             target_path = self.jail.resolve_path(target, base=self.jail.default_workspace())
@@ -1401,6 +1693,8 @@ class Orchestrator:
                 read_access=True,
             )
             return request
+        if len(target.split()) <= 5:
+            return self.registry.open_app_request(target, source)
         return None
 
     def _policy_audit_entry(self, request: ActionRequest, decision: PolicyDecision) -> AuditEntry:

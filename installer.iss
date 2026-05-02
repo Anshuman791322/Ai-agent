@@ -8,9 +8,10 @@ AppId={{7B5A2FC5-7E0C-4E4A-91F4-6B90E701A8B2}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-DefaultDirName={autopf}\{#MyAppName}
+DefaultDirName={localappdata}\Programs\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
+PrivilegesRequired=lowest
 OutputDir=installer-output
 OutputBaseFilename=jarvis-local-setup
 SetupIconFile=assets\app_icon.ico
@@ -26,6 +27,9 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 
 [Files]
 Source: "dist\JARVIS Local\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[InstallDelete]
+Type: filesandordirs; Name: "{app}\_internal\assets\openwakeword"
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
