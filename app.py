@@ -18,9 +18,11 @@ from core.event_bus import EventBus
 from core.orchestrator import Orchestrator
 from integrations.web_tools import ConstrainedWebTools
 from integrations.windows_context import WindowsContextProbe
+from integrations.secret_store import GeminiKeyStore
 from integrations.windows_startup import WindowsStartupRegistration
 from memory.store import MemoryStore
-from providers.llm.ollama_provider import OllamaProvider
+from providers.llm.base import LLMProvider
+from providers.llm.gemini_provider import GeminiProvider
 from resources import load_app_icon
 from routines import RoutineService, RoutineStore
 from security.approvals import ApprovalManager
@@ -159,7 +161,8 @@ class AppBootstrap:
         self.approvals: ApprovalManager | None = None
         self.audit: AuditLogger | None = None
         self.context_manager: ContextManager | None = None
-        self.llm: OllamaProvider | None = None
+        self.gemini_key_store: GeminiKeyStore | None = None
+        self.llm: LLMProvider | None = None
         self.voice: WhisperSTT | None = None
         self.actions: SystemActions | None = None
         self.registry: ActionRegistry | None = None
@@ -269,7 +272,8 @@ class AppBootstrap:
         self.approvals = ApprovalManager()
         self.audit = AuditLogger(self.settings.app_dir, debug_sensitive_logging=self.settings.debug_sensitive_logging)
         self.context_manager = ContextManager(self.settings, self.memory)
-        self.llm = OllamaProvider(self.settings)
+        self.gemini_key_store = GeminiKeyStore(self.settings)
+        self.llm = GeminiProvider(self.settings, key_store=self.gemini_key_store)
         self.voice = WhisperSTT(self.settings)
         self.actions = SystemActions(self.settings)
         self.web_tools = ConstrainedWebTools()
@@ -303,6 +307,7 @@ class AppBootstrap:
             self.web_tools,
             self.startup_manager,
             self.routine_service,
+            self.gemini_key_store,
         )
 
         icon = load_app_icon()
@@ -336,6 +341,7 @@ class AppBootstrap:
         self.bus.subscribe("policy", self.window.update_policy_state)
         self.bus.subscribe("approvals", self.window.update_approval_state)
         self.bus.subscribe("routines", self.window.update_routines)
+        self.bus.subscribe("gemini_key", self.window.update_gemini_key_state)
 
         self.window.command_input.submitted.connect(self.orchestrator.submit_text)
         self.window.command_input.voice_requested.connect(self.orchestrator.submit_voice_capture)
@@ -349,6 +355,8 @@ class AppBootstrap:
         self.window.clear_approvals_requested.connect(self.orchestrator.clear_pending_approvals)
         self.window.voice_toggle_requested.connect(self.orchestrator.toggle_voice_activation)
         self.window.startup_toggle_requested.connect(self.orchestrator.toggle_startup_on_login)
+        self.window.gemini_key_save_requested.connect(self.orchestrator.save_gemini_api_key)
+        self.window.gemini_key_clear_requested.connect(self.orchestrator.clear_gemini_api_key)
 
     def _create_timers(self) -> None:
         self.dispatch_timer = QTimer(self.app)

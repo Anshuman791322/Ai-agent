@@ -41,6 +41,9 @@ class SystemActions:
         "file explorer": ("file explorer", "windows explorer", "explorer"),
         "powershell": ("powershell", "power shell", "windows terminal"),
         "command prompt": ("command prompt", "cmd", "cmd.exe"),
+        "notepad": ("notepad", "note pad"),
+        "microsoft word": ("microsoft word", "ms word", "word", "winword"),
+        "codex": ("codex", "code x", "kodeks", "codex app"),
         "visual studio code": ("visual studio code", "vs code", "vscode", "code"),
         "chrome": ("chrome", "google chrome"),
         "edge": ("edge", "microsoft edge"),
@@ -111,11 +114,17 @@ class SystemActions:
     async def open_explorer(self, target_path: Path) -> ActionResult:
         return await asyncio.to_thread(self._open_explorer_sync, target_path)
 
+    async def search_files(self, root_path: Path, query: str, limit: int = 40) -> ActionResult:
+        return await asyncio.to_thread(self._search_files_sync, root_path, query, limit)
+
     async def list_workspace_files(self, target_path: Path, limit: int = 40) -> ActionResult:
         return await asyncio.to_thread(self._list_workspace_files_sync, target_path, limit)
 
     async def preview_file(self, target_path: Path, max_chars: int = 2400) -> ActionResult:
         return await asyncio.to_thread(self._preview_file_sync, target_path, max_chars)
+
+    async def write_text_file(self, target_path: Path, content: str, *, overwrite: bool = False) -> ActionResult:
+        return await asyncio.to_thread(self._write_text_file_sync, target_path, content, overwrite)
 
     async def run_workspace_command(self, command_id: str, timeout: int | None = None) -> ActionResult:
         runtime = timeout or (self.settings.max_task_runtime_seconds if self.settings is not None else 180)
@@ -219,6 +228,9 @@ class SystemActions:
         if not normalized:
             return None
 
+        if normalized in {"codex", "code x", "kodeks", "codex app"}:
+            return "codex"
+
         claude_match = re.match(r"^claude(?:\s+(?P<suffix>[a-z0-9]+))?$", normalized)
         if claude_match:
             suffix = claude_match.group("suffix")
@@ -282,7 +294,7 @@ class SystemActions:
     def _launch_named_app_sync(self, target: str) -> ActionResult:
         canonical = self.canonicalize_launch_target(target)
         if canonical is None:
-            return ActionResult(False, f"Unknown Windows app target: {target}")
+            return self._launch_start_menu_app_sync(target)
 
         if canonical == "claude code":
             return self._launch_claude_code_sync()
@@ -295,6 +307,15 @@ class SystemActions:
             return self._spawn_process([shell], "Opened PowerShell.")
         if canonical == "command prompt":
             return self._spawn_process(["cmd.exe"], "Opened Command Prompt.")
+        if canonical == "notepad":
+            return self._spawn_process(["notepad.exe"], "Opened Notepad.")
+        if canonical == "microsoft word":
+            word = shutil.which("winword") or shutil.which("winword.exe")
+            if word:
+                return self._spawn_process([word], "Opened Microsoft Word.")
+            return self._launch_start_menu_app_sync("microsoft word")
+        if canonical == "codex":
+            return self._launch_codex_sync()
         if canonical == "visual studio code":
             code_path = shutil.which("code")
             if not code_path:
@@ -314,7 +335,7 @@ class SystemActions:
             if edge_path is None:
                 return ActionResult(False, "Microsoft Edge was not found on this machine.")
             return self._spawn_process([edge_path], "Opened Microsoft Edge.")
-        return ActionResult(False, f"No launcher is defined for {canonical}.")
+        return self._launch_start_menu_app_sync(target)
 
     def _open_in_browser_sync(self, target: str, browser: str = "chrome") -> ActionResult:
         resolved_url = self.resolve_site_target(target)
@@ -334,6 +355,58 @@ class SystemActions:
         if not target_path.exists():
             return ActionResult(False, f"Path not found: {target_path}")
         return self._spawn_process(["explorer.exe", str(target_path)], f"Opened File Explorer at {target_path}.")
+
+    def _search_files_sync(self, root_path: Path, query: str, limit: int) -> ActionResult:
+        root_path = Path(root_path).expanduser()
+        cleaned_query = " ".join(query.strip().split())
+        if not cleaned_query:
+            return ActionResult(False, "No file search query was provided.")
+        if not root_path.exists():
+            return ActionResult(False, f"Search root not found: {root_path}")
+        if not root_path.is_dir():
+            return ActionResult(False, f"Search root is not a directory: {root_path}")
+
+        needle = cleaned_query.lower()
+        ignored = {
+            ".git",
+            ".venv",
+            "__pycache__",
+            "node_modules",
+            "AppData",
+            "Windows",
+            "Program Files",
+            "Program Files (x86)",
+        }
+        matches: list[Path] = []
+        scanned = 0
+        stack = [root_path]
+        while stack and len(matches) < limit and scanned < 25000:
+            current = stack.pop()
+            try:
+                children = list(current.iterdir())
+            except OSError:
+                continue
+            for child in children:
+                scanned += 1
+                if child.name in ignored:
+                    continue
+                if needle in child.name.lower():
+                    matches.append(child)
+                    if len(matches) >= limit:
+                        break
+                if child.is_dir():
+                    stack.append(child)
+                if scanned >= 25000:
+                    break
+
+        if not matches:
+            return ActionResult(True, f"No files matched {cleaned_query!r} under {root_path}.", details={"scanned": scanned})
+
+        lines = [f"File search results for {cleaned_query!r} under {root_path}:"]
+        lines.extend(str(path) for path in matches[:limit])
+        if scanned >= 25000:
+            lines.append("[search stopped at safety scan limit]")
+        return ActionResult(True, "\n".join(lines), details={"matches": len(matches), "scanned": scanned})
 
     def _list_workspace_files_sync(self, target_path: Path, limit: int) -> ActionResult:
         target_path = Path(target_path).expanduser()
@@ -365,6 +438,21 @@ class SystemActions:
             preview = preview.rstrip() + "\n[preview truncated]"
         return ActionResult(True, f"Preview of {target_path.name}:\n{preview}", output=preview)
 
+    def _write_text_file_sync(self, target_path: Path, content: str, overwrite: bool) -> ActionResult:
+        target_path = Path(target_path).expanduser()
+        if target_path.exists() and not overwrite:
+            return ActionResult(False, f"Refusing to overwrite existing file without approval: {target_path}")
+        try:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            return ActionResult(False, f"Could not write {target_path}: {exc}")
+        return ActionResult(
+            True,
+            f"Wrote {target_path}.",
+            details={"path": str(target_path), "bytes": len(content.encode("utf-8"))},
+        )
+
     def _launch_claude_code_sync(self) -> ActionResult:
         shell = shutil.which("powershell") or shutil.which("pwsh")
         claude = shutil.which("claude")
@@ -382,6 +470,58 @@ class SystemActions:
             f"Opened Claude Code in {workspace}.",
             cwd=workspace,
         )
+
+    def _launch_codex_sync(self) -> ActionResult:
+        launched = self._launch_start_menu_app_sync("codex")
+        if launched.success:
+            return launched
+        codex_cli = shutil.which("codex") or shutil.which("codex.exe")
+        workspace = self._claude_workspace()
+        if codex_cli:
+            return self._spawn_process([codex_cli], "Opened Codex.", cwd=workspace)
+        return ActionResult(False, "Codex was not found as a Start Menu app or PATH command.")
+
+    def _launch_start_menu_app_sync(self, target: str) -> ActionResult:
+        normalized = self._normalize_target(target)
+        candidates = self._start_menu_candidates()
+        best_path: Path | None = None
+        best_score = 0.0
+        for candidate in candidates:
+            candidate_name = self._normalize_target(candidate.stem)
+            if normalized == candidate_name:
+                best_path = candidate
+                best_score = 1.0
+                break
+            score = SequenceMatcher(None, normalized, candidate_name).ratio()
+            if score > best_score:
+                best_path = candidate
+                best_score = score
+        if best_path is None or best_score < 0.82:
+            return ActionResult(False, f"Could not find a Windows app shortcut for {target}.")
+        try:
+            if hasattr(os, "startfile"):
+                os.startfile(str(best_path))
+            else:
+                return self._spawn_process([str(best_path)], f"Opened {best_path.stem}.")
+        except Exception as exc:
+            return ActionResult(False, f"Failed to open {best_path}: {exc}")
+        return ActionResult(True, f"Opened {best_path.stem}.")
+
+    def _start_menu_candidates(self) -> list[Path]:
+        roots = (
+            Path(os.getenv("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs",
+            Path(os.getenv("PROGRAMDATA", "")) / "Microsoft/Windows/Start Menu/Programs",
+            Path(os.getenv("LOCALAPPDATA", "")) / "Programs",
+        )
+        candidates: list[Path] = []
+        for root in roots:
+            if not root.exists():
+                continue
+            try:
+                candidates.extend(path for path in root.rglob("*") if path.suffix.lower() in {".lnk", ".exe", ".appref-ms"})
+            except OSError:
+                continue
+        return candidates
 
     def _spawn_process(self, command: list[str], message: str, cwd: Path | None = None) -> ActionResult:
         try:

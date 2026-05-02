@@ -92,8 +92,10 @@ class WakePhraseListener:
         self._run_transcript_fallback(np, sd)
 
     def _run_openwakeword(self, np, sd) -> None:
-        from openwakeword.model import Model
-        from openwakeword.utils import download_models
+        from importlib import import_module
+
+        Model = import_module("openwakeword.model").Model
+        download_models = import_module("openwakeword.utils").download_models
 
         model_dir = self.settings.app_dir / "models" / "openwakeword"
         self._ensure_openwakeword_assets(model_dir, download_models)
